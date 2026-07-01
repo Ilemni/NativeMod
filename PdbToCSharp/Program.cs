@@ -497,9 +497,12 @@ internal static class Program {
   private static void WriteStatics(string outputName, PdbFile pdb) {
     // Like WriteGlobals, but only write DataSymbols and ThreadLocalDataSymbols
     ArrayCache<SymbolRecord> globalSymbols = pdb.GlobalsStream.Symbols;
+    var headers = pdb.DbiStream.OriginalSectionHeaders ?? pdb.DbiStream.SectionHeaders;
     using StreamWriter staticsWriter = new(outputName);
     foreach (DataSymbol data in globalSymbols.OfType<DataSymbol>().OrderBy(s => s.Segment).ThenBy(s => s.Offset)) {
-      staticsWriter.WriteLine($"{data.Offset:X8}:{data.Segment:X4} | " +
+      ushort segment = data.Segment;
+      uint rva = segment > 0 && segment <= headers.Length ? headers[segment - 1].VirtualAddress + data.Offset : 0;
+      staticsWriter.WriteLine($"{data.Offset:X8}:{segment:X4} = {rva:X8} | " +
         $"Data TypeIndex={data.Type.Index,8} Name=\"{data.Name.String}\", Type={data.Type.ToString(pdb)}");
     }
   }
