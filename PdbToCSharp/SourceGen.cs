@@ -1,464 +1,505 @@
-﻿using Microsoft.CodeAnalysis;
+﻿using System.Diagnostics;
+using System.Diagnostics.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
 using SharpPdb.Native;
+using SharpPdb.Native.Types;
 using SharpPdb.Windows;
 using SharpPdb.Windows.TypeRecords;
+using PdbUdt = SharpPdb.Native.Types.PdbUserDefinedType;
+using FsNamespaceDecl = Microsoft.CodeAnalysis.CSharp.Syntax.FileScopedNamespaceDeclarationSyntax;
+using MethodDecl = Microsoft.CodeAnalysis.CSharp.Syntax.BaseMethodDeclarationSyntax;
 using static Microsoft.CodeAnalysis.CSharp.SyntaxFactory;
-using MethodKind = SharpPdb.Windows.TypeRecords.MethodKind;
 
 namespace PdbToCSharp;
 
-public static class SourceGen {
-  private static readonly AttributeSyntax CompGenAttribute =
-    Attribute(IdentifierName("CompilerGenerated"));
+public sealed partial class SourceGen(string path, string namespaceName) : IDisposable {
+  private readonly PdbFileReader _pdb = new(path);
+  private PdbFile PdbFile => _pdb.PdbFile;
+  private readonly Namespaces _ns = new(namespaceName);
 
-  private static readonly AttributeSyntax StructLayoutAttributeSyntax =
-    Attribute(IdentifierName("StructLayout(LayoutKind.Explicit)"));
+  /// Filtered array of User Defined Types, excluding forward references, scoped types, and compiler generated types.
+  private PdbUdt[] _udts = null!;
 
+  private readonly Dictionary<string, PdbUdt> _addedClasses = [];
+  private readonly Dictionary<string, PdbEnumType> _addedEnums = [];
 
-  private static SyntaxList<AttributeListSyntax> ClassAttribute(ulong structSize) => List<AttributeListSyntax>(
-  [
-    AttributeList(SingletonSeparatedList(CompGenAttribute)),
-    AttributeList(SingletonSeparatedList(CreateStructLayoutAttribute(structSize)))
-  ]);
+  /// Types which only have a forward reference.
+  private readonly HashSet<string> _missingTypes = [];
 
+  /// Types which are nested but lack a parent type.
+  private readonly HashSet<PdbUdt> _orphanedNestedTypes = [];
 
-  private static AttributeSyntax CreateFieldOffsetAttribute(int offset) {
-    return
-      Attribute(IdentifierName("FieldOffset"))
-        .WithArgumentList(
-          AttributeArgumentList(
-            SingletonSeparatedList(
-              AttributeArgument(
-                LiteralExpression(
-                  SyntaxKind.NumericLiteralExpression,
-                  Literal(offset))))));
+  public void PdbToCSharp(string outputPath) {
+    Log.Step("Processing PDB...");
+    Process();
+
+    Log.Step("Writing generated C# code...");
+    _ns.WriteAllToFiles(outputPath);
+    Log.Step("Done.");
   }
 
-  private static AttributeSyntax CreateStructLayoutAttribute(ulong size) {
-    return Attribute(IdentifierName("StructLayout"))
-      .WithArgumentList(
-        AttributeArgumentList(
-          SeparatedList<AttributeArgumentSyntax>(
-            new SyntaxNodeOrToken[] {
-              AttributeArgument(
-                MemberAccessExpression(
-                  SyntaxKind.SimpleMemberAccessExpression, IdentifierName("LayoutKind"), IdentifierName("Explicit"))),
-              Token(SyntaxKind.CommaToken),
-              AttributeArgument(
-                  LiteralExpression(SyntaxKind.NumericLiteralExpression, Literal((int)size)))
-                .WithNameEquals(NameEquals(IdentifierName("Size")))
-            }
-          )
-        )
-      );
-  }
+  private void Process() {
+    PreProcess();
+    Log.Step("Creating inline array types...");
+    ProcessInlineArrays();
+    // DebugPdb();
 
-  private static readonly SyntaxTokenList PublicKeywordMod =
-    [Token(SyntaxKind.PublicKeyword)];
+    Log.Step("Creating all other types...");
+    foreach (PdbUdt udt in _udts.Where(u => !u.IsNested)) {
+      string name = GetQualifiedName(udt);
+      if (udt is PdbEnumType enumType) {
+        if (_addedEnums.TryGetValue(name, out PdbEnumType? existingEnum)) {
+          if (existingEnum.UniqueName == enumType.UniqueName && !string.IsNullOrEmpty(enumType.UniqueName)) {
+            continue;
+          }
 
-  private static readonly SyntaxTokenList TypeKeywordMod =
-    [Token(SyntaxKind.PublicKeyword), Token(SyntaxKind.UnsafeKeyword)];
+          Log.Warn(
+            $"Duplicate enum name {name} for {enumType.Name} and {existingEnum.Name}. Skipping {enumType.Name}");
+        }
 
-
-  public static void PdbToCSharp(string path, string namespaceName) {
-    PdbFileReader managedPdb = new(path);
-    PdbFile pdb = managedPdb.PdbFile;
-    ProcedureHelper.Load(pdb);
-    var argNames = ProcedureHelper.Names;
-    int badArgCount = argNames.Values.Count(v => !v.GoodSize);
-
-    FileScopedNamespaceDeclarationSyntax classNs = FileScopedNamespaceDeclaration(IdentifierName(namespaceName))
-        .WithUsings(List([
-          UsingDirective(QualifiedName(QualifiedName(IdentifierName("System"), IdentifierName("Runtime")),
-            IdentifierName("CompilerServices"))),
-          UsingDirective(QualifiedName(QualifiedName(IdentifierName("System"), IdentifierName("Runtime")),
-            IdentifierName("InteropServices"))),
-          UsingDirective(IdentifierName("ModLoader")).WithStaticKeyword(Token(SyntaxKind.StaticKeyword))
-        ]))
-        .WithNamespaceKeyword(
-          Token(
-            TriviaList(
-              Comment("// ReSharper disable InvalidXmlDocComment"),
-              Comment("// ReSharper disable RedundantUnsafeContext"),
-              Comment("// ReSharper disable InconsistentNaming"),
-              Comment("// ReSharper disable UnusedType.Global")),
-            SyntaxKind.NamespaceKeyword,
-            TriviaList()))
-      ;
-
-    // ReSharper disable SuggestVarOrType_SimpleTypes
-    var enumNs = classNs;
-    var unionNs = classNs;
-    var templateNs = classNs;
-    var templateUnionNs = classNs;
-    var stdNs = classNs; // std:: classes
-    var imNs = classNs; // ImGui classes
-    var hbNs = classNs; // HarfBuzz classes
-    var d3dNs = classNs; // Direct3D classes
-    var pfNs = classNs; // PlayFab classes
-    var fmodNs = classNs; // FMOD classes
-    var jsonNs = classNs; // JSON classes
-    var internalNs = classNs; // Internal classes
-    var cgNs = classNs; // Compiler generated classes
-    // ReSharper restore SuggestVarOrType_SimpleTypes
-
-    var tpiRecords = pdb.TpiStream.GetTypeRecords();
-    Dictionary<string, int> namespaces = [];
-
-    foreach (TagRecord tagRecord in tpiRecords.OfType<TagRecord>().Where(r => !r.IsForwardReference)) {
-      if (tagRecord is EnumRecord enumRecord) {
-        enumNs = enumNs.AddMember(CreateType(enumRecord, pdb));
+        ref FsNamespaceDecl enumNs = ref _ns.EnumNs;
+        enumNs = enumNs.AddMember(CreateEnum(enumType));
+        _addedEnums[name] = enumType;
         continue;
       }
 
-      string name = tagRecord.Name.String;
+      if (!_addedClasses.TryAdd(name, udt)) {
+        // Log.Info($"Skipping duplicate class {genName} for {udt.Name}");
+        continue;
+      }
+
+      ref FsNamespaceDecl nsToAdd = ref _ns.GetMatching(udt);
+      CreateTypeForNs(udt, ref nsToAdd);
+    }
+  }
+
+  [Conditional("DEBUG")]
+  [SuppressMessage("ReSharper", "CollectionNeverQueried.Local")]
+  [SuppressMessage("ReSharper", "UnusedVariable")]
+  // Random linq methods to poke at things
+  private void DebugPdb() {
+    // Debug enum scopes
+    List<PdbEnumType> scopedEnums = [];
+    List<PdbEnumType> unscopedEnums = [];
+    foreach (PdbEnumType pdbEnumType in _udts.OfType<PdbEnumType>().Where(e => !e.Name.Contains('<'))) {
+      (pdbEnumType.IsScoped ? scopedEnums : unscopedEnums).Add(pdbEnumType);
+    }
+
+    // Debug pointer fields
+    var pointerFields = new Dictionary<PdbUdt, PdbUdt[]>();
+    foreach (PdbUdt udt in _udts.Where(u => !u.IsScoped)) {
+      var scopedFields = udt.Fields
+        .Select(f => f.Type)
+        .Select(f =>
+          f as PdbUdt ??
+          (f as PdbPointerType)?.ElementType as PdbUdt)
+        .Where(u => u is { IsScoped: true }).ToArray();
+      if (scopedFields.Length > 0) {
+        pointerFields[udt] = scopedFields!;
+      }
+    }
+
+    // Debug pointer depth
+    var pDict = new Dictionary<int, List<PdbTypeField>>();
+    foreach (var fields in _udts.Select(u => u.Fields)) {
+      foreach (PdbTypeField f in fields) {
+        if (f.Type is PdbPointerType pointer && GetPointerDepth(pointer) is > 0 and var pointerDepth) {
+          if (!pDict.TryGetValue(pointerDepth, out var l)) {
+            l = [];
+            pDict[pointerDepth] = l;
+          }
+
+          l.Add(f);
+        }
+      }
+    }
+
+    // Debug pdb namespaces
+    Dictionary<string, int> namespaces = [];
+    foreach (PdbUdt udt in _udts.Where(u => !u.IsNested)) {
+      string name = udt.Name;
       if (!name.Contains('<') && name.Contains("::")) {
         string toAdd = name[..name.LastIndexOf("::", StringComparison.Ordinal)];
         namespaces.Increment(toAdd);
       }
-      bool isClass = tagRecord is ClassRecord;
+    }
 
-      if (name.StartsWith('_')) {
-        CreateTypeForNs(tagRecord, pdb, ref internalNs);
-      }
-      else if (name.StartsWith('$')) {
-        CreateTypeForNs(tagRecord, pdb, ref cgNs);
-      }
-      else if (name.Contains('<')) {
-        if (isClass) {
-          CreateTypeForNs(tagRecord, pdb, ref templateNs);
-        }
-        else {
-          CreateTypeForNs(tagRecord, pdb, ref templateUnionNs);
-        }
-      }
-      else if (MatchName(name, "std::")) {
-        CreateTypeForNs(tagRecord, pdb, ref stdNs);
-      }
-      else if (MatchName(name, "ImGui::") || name.StartsWith("Im") && name.Length > 2 && char.IsUpper(name[2])) {
-        CreateTypeForNs(tagRecord, pdb, ref imNs);
-      }
-      else if (MatchName(name, "hb_")) {
-        CreateTypeForNs(tagRecord, pdb, ref hbNs);
-      }
-      else if (MatchName(name, "DXGI", "D3D", "D2D")) {
-        CreateTypeForNs(tagRecord, pdb, ref d3dNs);
-      }
-      else if (MatchName(name, "PlayFab")) {
-        CreateTypeForNs(tagRecord, pdb, ref pfNs);
-      }
-      else if (MatchName(name, "FMOD")) {
-        CreateTypeForNs(tagRecord, pdb, ref fmodNs);
-      }
-      else if (MatchName(name, "Json")) {
-        CreateTypeForNs(tagRecord, pdb, ref jsonNs);
-      }
-      else if (isClass) {
-        CreateTypeForNs(tagRecord, pdb, ref classNs);
-      }
-      else if (tagRecord is UnionRecord) {
-        CreateTypeForNs(tagRecord, pdb, ref unionNs);
+    var list = namespaces.OrderByDescending(kvp => kvp.Value).ToArray();
+    var list2 = namespaces.OrderBy(kvp => kvp.Key).ToArray();
+
+
+    var fromRecords = _pdb.AsRecordEnumerable()
+      .OfType<FieldListRecord>()
+      .Select(f => f.Fields
+        .OfType<NestedTypeRecord>()
+        .Select(n => (n, _pdb.TryGetType<PdbUdt>(n.Type) is { IsNested: true } u ? u : null))
+        .Where(r => r.Item2 is not null)
+        .OfType<(NestedTypeRecord, PdbUdt)>()
+        .ToArray())
+      .Where(r => r.Length > 0)
+      .ToArray();
+
+    var unnamedNestedTypes = fromRecords
+      .SelectMany(r => r)
+      .Where(r => r.Item1.Name.String.Contains('<'))
+      .OrderBy(r => r.Item1.Name.String)
+      .ToArray();
+
+    var fromManaged = _pdb.UDTs
+      .Where(u => u.ContainsNestedClass)
+      .Select(u => (u, u.NestedTypes.ToArray()))
+      .Where(t => t.Item2.Length > 0)
+      .OrderBy(t => t.u.Name)
+      .ToArray();
+
+    var bosses = _udts.Where(u => u.BaseClasses.Any(b => b.BaseType.Name.Contains("Boss"))).ToArray();
+
+    var virtuals = _udts
+      .Where(u => !u.Name.StartsWith("std::") && u.VirtualBaseClasses.Any())
+      .Select(u => (u, u.FieldRecords))
+      .Where(u => u.FieldRecords.Any(f => f.Kind == TypeLeafKind.LF_VFUNCTAB))
+      .Select(u => (u.u, u.FieldRecords, u.FieldRecords
+        .OfType<VirtualFunctionPointerRecord>()
+        .Select(v =>
+          PdbFile.GetRecord(PdbFile.GetRecord<PointerRecord>(v.Type).ReferentType))
+        .ToArray()))
+      .ToArray();
+    var virtualBCs = _udts
+      .Where(u => !u.Name.StartsWith("std::") && u.VirtualBaseClasses.Any())
+      .Select(u => (u, u.FieldRecords))
+      .ToArray();
+
+    var scoped = _pdb.UDTs.Where(u =>
+      !u.TagRecord.IsForwardReference &&
+      u.IsScoped &&
+      u is not PdbEnumType &&
+      !u.Name.Contains("unnamed struct at") &&
+      !u.Name.Contains("`lambda at") &&
+      !u.Name.Contains("<lambda_")
+    ).ToArray();
+  }
+
+  private void CreateTypeForNs(PdbUdt udt, ref FsNamespaceDecl ns) {
+    string name = GetSelfName(udt);
+    MemberDeclarationSyntax member = CreateType(udt, name);
+    ns = ns.AddMember(member);
+  }
+
+
+  private void PreProcess() {
+    // Collect all types which we're interested in generating, and create their names.
+    _udts = _pdb.UDTs.Where(u =>
+      !u.TagRecord.IsForwardReference &&
+      !u.IsScoped &&
+      !u.Name.Contains("unnamed struct at") &&
+      !u.Name.Contains("`lambda at") &&
+      !u.Name.Contains("<lambda_")
+    ).ToArray();
+
+    var nestedTypes = _pdb.UDTs
+      .Where(u => u.ContainsNestedClass)
+      .SelectMany(p => p.NestedTypes.Select(n => (n, p)));
+    var unnamedNestedTypes = nestedTypes
+      .Select(a => (p: a.p.Name, n: a.n.Item1.Name.String))
+      .Where(n => n.n.Contains('<'))
+      .OrderBy(n => n.n)
+      .ToArray();
+    // foreach ((NestedTypeRecord record, PdbUdt nestedUdt) in nestedTypes) {
+    //   string name = record.Name.String;
+    //   if (name.Contains('<') || name.Contains("unnamed struct at") || name.Contains("`lambda at")) {
+    //     continue;
+    //   }
+    // }
+
+    // Create names for all top-level types first, so that nested types can use the parent name as a prefix.
+    Log.Step("Creating initial names for all types...");
+    foreach (PdbUdt udt in _pdb.UDTs.Where(u =>
+               !u.TagRecord.IsForwardReference &&
+               !u.Name.Contains("unnamed struct at") &&
+               !u.Name.Contains("`lambda at") &&
+               !u.Name.Contains("lambda_")
+             )) {
+      GetOrCreateTypeName(udt);
+    }
+
+    Log.Step("Creating qualified names for all types...");
+    QualifyAllNames();
+
+    var enumNames = _fullNames.Select(kvp => (_pdb.TryGetType<PdbEnumType>(kvp.Key), kvp.Value))
+      .Where(t => t.Item1 is not null)
+      .ToArray();
+
+    // Collect types which have forward-references but lack actual bodies
+    Log.Step("Looking for missing types (only forward-referenced)...");
+    var forwardRefs = _pdb.UDTs.Where(u => u.TagRecord.IsForwardReference).ToArray();
+    var nonForwardRefs = _pdb.UDTs.Where(u => !u.TagRecord.IsForwardReference).ToArray();
+    _missingTypes.UnionWith(
+      forwardRefs.Where(u =>
+          nonForwardRefs.All(uu => uu.UniqueName != u.UniqueName))
+        .Select(u => u.Name));
+  }
+
+  /// We try to qualify all names so that we can support creating nested structs.
+  /// A struct must refer to itself when defining itself by its own name (i.e. Tag)
+  /// while all other types must refer to it by its full name (i.e. Outer.Inner.Tag)
+  /// Fortunately a struct can refer to itself with the fully qualified name.
+  private void QualifyAllNames() {
+    foreach (PdbEnumType enumType in _pdb.UDTs.OfType<PdbEnumType>().Where(e => !e.IsNested)) {
+      _typeNames[enumType] = CreateEnumTypeName(enumType);
+    }
+
+    Dictionary<PdbUdt, (PdbUdt parent, string name)> typesToQualify = [];
+    foreach (PdbUdt parent in _pdb.UDTs.Where(u => u.ContainsNestedClass)) {
+      foreach ((NestedTypeRecord n, PdbUdt nested) in parent.NestedTypes) {
+        string name = n.Name.String.SanitizeName();
+        typesToQualify[nested] = (parent, name);
+        _typeNames[nested] = name;
       }
     }
 
-    // Write the generated C# code to a file
-    string pdbName = Path.GetFileNameWithoutExtension(path);
-    Console.WriteLine("Writing generated C# code...");
+    // List is populated before creating names, to ensure we have full parent chains for all nested types.
+    foreach (var kvp in typesToQualify) {
+      string qualifiedName = QualifyName(kvp.Key);
+      AddQualifiedName(kvp.Key, qualifiedName);
+    }
 
-    // classNs.WriteToFile($"output/{pdbName}_generated_classes.cs");
-    // enumNs.WriteToFile($"output/{pdbName}_generated_enums.cs");
-    // unionNs.WriteToFile($"output/{pdbName}_generated_unions.cs");
-    // templateNs.WriteToFile($"output/{pdbName}_generated_template_classes.cs");
-    // templateUnionNs.WriteToFile($"output/{pdbName}_generated_template_union.cs");
-    // stdNs.WriteToFile($"output/{pdbName}_generated_std_classes.cs");
-    // imNs.WriteToFile($"output/{pdbName}_generated_imgui_classes.cs");
-    // hbNs.WriteToFile($"output/{pdbName}_generated_hb_classes.cs");
-    // d3dNs.WriteToFile($"output/{pdbName}_generated_d3d_classes.cs");
-    // pfNs.WriteToFile($"output/{pdbName}_generated_playfab_classes.cs");
-    // fmodNs.WriteToFile($"output/{pdbName}_generated_fmod_classes.cs");
-    // jsonNs.WriteToFile($"output/{pdbName}_generated_json_classes.cs");
-    // internalNs.WriteToFile($"output/{pdbName}_generated_internal_classes.cs");
-    // cgNs.WriteToFile($"output/{pdbName}_generated_cpp_generated_classes.cs");
+    // Find nested types which are missing a parent type
+    foreach (PdbUdt nested in _udts.Where(u => u.IsNested)) {
+      if (!HasQualifiedName(nested)) {
+        _orphanedNestedTypes.Add(nested);
+      }
+    }
 
-    var list = namespaces.OrderByDescending(kvp => kvp.Value).ToList();
-    var list2 = namespaces.OrderBy(kvp => kvp.Key).ToList();
+    // Add top-level name which has no nesting.
+    foreach ((PdbType key, string value) in _typeNames) {
+      if (key is PdbUdt udt) {
+        TryAddSelfName(udt, value);
+        TryAddQualifiedName(udt, value);
+      }
+    }
+
+    if (_orphanedNestedTypes.Count > 0) {
+      Log.Warn($"Found {_orphanedNestedTypes.Count} orphaned nested types.\n    "
+        + string.Join("\n    ", _orphanedNestedTypes.Select(n => $"\"{n.Name}\"").Order(StringComparer.Ordinal)));
+    }
+
+    var a = _fullNames.Where(kvp => kvp.Value.Contains("Watcher"));
+    var b = _selfNames.Where(kvp => kvp.Value.Contains("Watcher"));
+
     return;
 
-    bool MatchName(string toCompare, params ReadOnlySpan<string> args) {
-      foreach (string arg in args) {
-        if (toCompare.Contains(arg, StringComparison.OrdinalIgnoreCase)) {
-          return true;
-        }
+    string QualifyName(PdbUdt type) {
+      if (!type.IsNested) {
+        return _typeNames[type];
       }
 
-      return false;
-    }
+      if (typesToQualify.TryGetValue(type, out (PdbUdt parent, string name) parentInfo)) {
+        PdbUdt parent = parentInfo.parent;
+        string parentName = QualifyName(parent);
+        return $"{parentName}.{parentInfo.name}";
+      }
 
-    void CreateTypeForNs(TagRecord tagRecord, PdbFile p, ref FileScopedNamespaceDeclarationSyntax ns) {
-      MemberDeclarationSyntax member = CreateType(tagRecord, p);
-      ns = ns.AddMember(member);
+      if (_fullNames.TryGetValue(type.TypeIndex, out string? fullName)) {
+        return fullName;
+      }
+
+      if (_fullNames.FirstOrDefault(kvp => ((PdbUdt)_pdb.GetType(kvp.Key)).UniqueName == type.UniqueName).Value is
+          { } found) {
+        return found;
+      }
+
+      string name =
+        typesToQualify.TryGetValue(type, out (PdbUdt _, string name) res)
+          ? res.name
+          : typesToQualify.First(q => q.Key.UniqueName == type.UniqueName).Value.name;
+
+      return name;
     }
   }
 
-  private static MemberDeclarationSyntax CreateType(TagRecord tagRecord, PdbFile pdb) {
-    return tagRecord switch {
-      ClassRecord classRecord => CreateType(classRecord, pdb),
-      UnionRecord unionRecord => CreateType(unionRecord, pdb),
-      EnumRecord enumRecord => CreateType(enumRecord, pdb),
-      _ => throw new InvalidDataException($"Unexpected tag record kind: {tagRecord.Kind}")
+  private MemberDeclarationSyntax CreateType(PdbUdt udt, string? name = null) {
+    if (udt.TagRecord.IsForwardReference) {
+      throw new ArgumentException($"Cannot create type for forward reference: {udt.Name}");
+    }
+
+    return udt switch {
+      PdbClassType or PdbUnionType => CreateStruct(udt, name),
+      PdbEnumType enumType => CreateEnum(enumType, name),
+      _ => throw new InvalidDataException($"Unexpected tag record kind: {udt.GetType().Name}, name: {udt.Name}")
     };
   }
 
-  private static StructDeclarationSyntax CreateType(ClassRecord classRecord, PdbFile pdb) {
-    var fields = classRecord.FieldList.As<FieldListRecord>(pdb).Fields;
-    var s = fields
-      .Where(f => f is not (VirtualFunctionPointerRecord or BaseClassRecord or VirtualBaseClassRecord
-        or DataMemberRecord
-        or StaticDataMemberRecord or OneMethodRecord or OverloadedMethodRecord or NestedTypeRecord))
-      .Select(f => Comment($"// ({f.Kind} | {f.GetType().Name}) {f.ToString(pdb)}")).ToArray();
-    if (s.Length > 0) {
-      Console.ForegroundColor = ConsoleColor.Yellow;
-      Console.WriteLine($"Warning: Class {classRecord.Name.String} has unhandled fields:");
-      foreach (SyntaxTrivia field in s) {
-        Console.WriteLine(field.ToString());
+  private StructDeclarationSyntax CreateStruct(PdbUdt udtType, string? name = null) {
+    name ??= GetOrCreateTypeName(udtType);
+    StructDeclarationSyntax csClass = CreateStructSyntax(udtType, name);
+
+    int baseClassesCount = udtType.BaseClasses.Count;
+    for (int i = 0; i < baseClassesCount; i++) {
+      PdbTypeBaseClass baseClass = udtType.BaseClasses[i];
+      if (baseClass.Access == MemberAccess.Private) {
+        continue;
       }
 
-      Console.ResetColor();
+      string baseName = GetOrCreateTypeName(baseClass.BaseType);
+      FieldDeclarationSyntax field = CreateBaseTypeFieldSyntax(baseClass, baseName, baseClassesCount > 1 ? i : null);
+      csClass = csClass.AddMember(field);
     }
 
-    StructDeclarationSyntax @class = StructDeclaration(classRecord.Name.String.SanitizeName())
-      .WithAttributeLists(ClassAttribute(classRecord.Size))
-      .WithModifiers(TypeKeywordMod)
-      .WithCloseBraceToken(
-        Token(
-          TriviaList(s),
-          SyntaxKind.CloseBraceToken,
-          TriviaList()))
-      .WithLeadingTrivia(Comment($"/// Struct type: {classRecord.Name.String} ({classRecord.UniqueName})"));
-
-    var baseClassRecords = fields.OfType<BaseClassRecord>();
-    // int count = baseClassRecords.Count();
-    // if (count != 0) {
-    //   if (count > 1) {
-    //     Console.ForegroundColor = ConsoleColor.Yellow;
-    //     Console.WriteLine(
-    //       $"Warning: Class {classRecord.Name.String} has multiple base classes ({string.Join(", ", baseClassRecords.Select(b => b.Type.ToString(pdb)))}). This may not be supported in C#.");
-    //     Console.ResetColor();
-    //   }
-    //
-    //   @class = @class.WithBaseList(
-    //     BaseList(
-    //       SeparatedList<BaseTypeSyntax>(
-    //         baseClassRecords.Select(b => SimpleBaseType(IdentifierName(b.Type.ToString(pdb).SanitizeName())))
-    //       )
-    //     )
-    //   );
-    // }
-
     // Static fields
-    foreach (StaticDataMemberRecord staticF in fields.OfType<StaticDataMemberRecord>()) {
-      FieldDeclarationSyntax field = FieldDeclaration(
-          VariableDeclaration(IdentifierName(staticF.Type.ToString(pdb)))
-            .AddVariables(VariableDeclarator(staticF.Name.String)))
-        .WithModifiers(PublicKeywordMod);
-      @class = @class.AddMember(field);
+    foreach (PdbTypeStaticField staticF in udtType.StaticFields) {
+      string fieldTypeName = GetQualifiedName(staticF.Type);
+      switch (staticF) {
+        case PdbTypeConstant constant:
+          string value = fieldTypeName == "bool"
+            ? (ushort)constant.Value > 0 ? "true" : "false"
+            : constant.Value.ToString()!;
+
+          // Support for: const ulong MyConst = unchecked((ulong)-1)
+          if (constant.Value is sbyte and < 0 && fieldTypeName == "ulong") {
+            value = $"unchecked((ulong){constant.Value})";
+          }
+
+          FieldDeclarationSyntax field = CreateConstFieldSyntax(constant, fieldTypeName, value);
+          csClass = csClass.AddMember(field);
+          continue;
+        case PdbTypeRegularStaticField staticField:
+          PropertyDeclarationSyntax prop = CreateStaticField(staticField, fieldTypeName);
+          csClass = csClass.AddMember(prop);
+          continue;
+      }
     }
 
     // Instance fields
-    foreach (DataMemberRecord f in fields.OfType<DataMemberRecord>()) {
-      FieldDeclarationSyntax field = CreateField(f, pdb);
+    foreach (PdbTypeField f in udtType.Fields) {
+      // TODO: Generate properties that can handle get and set to bit fields.
+      if (f is PdbTypeBitField) {
+        continue;
+      }
 
-      @class = @class.AddMember(field);
+      // TODO: Handle this better, maybe by creating an empty placeholder type for the missing type.
+      //  Some fields are a pointer to a type, which the PDB may only have as a forward reference.
+      if (_missingTypes.Contains(f.Type.Name) ||
+          f.Type is PdbPointerType p && _missingTypes.Contains(p.ElementType.Name)) {
+        continue;
+      }
+
+      string fieldName = GetQualifiedName(f.Type);
+      FieldDeclarationSyntax field = CreateInstanceFieldSyntax(f, fieldName);
+      csClass = csClass.AddMember(field);
     }
 
     // Methods
-    foreach (OneMethodRecord m in fields.OfType<OneMethodRecord>()) {
-      BaseMethodDeclarationSyntax? method = CreateMethodDeclaration(m, pdb, m.Name.String);
+    // PdbFileReader doesn't handle methods, so we do it manually
+    var pdbFieldList = udtType.FieldRecords;
+    foreach (OneMethodRecord m in pdbFieldList.OfType<OneMethodRecord>()) {
+      break;
+
+      MethodDecl? method = CreateMethodDeclaration(m, m.Name.String);
       if (method is not null) {
-        @class = @class.AddMember(method);
+        csClass = csClass.AddMember(method);
       }
     }
 
     // Methods that share the same name (overloaded methods)
-    foreach (OverloadedMethodRecord olM in fields.OfType<OverloadedMethodRecord>()) {
-      foreach (OneMethodRecord m in olM.MethodList.As<MethodOverloadListRecord>(pdb).Methods) {
-        BaseMethodDeclarationSyntax? method = CreateMethodDeclaration(m, pdb, olM.Name.String);
+    foreach (OverloadedMethodRecord olM in pdbFieldList.OfType<OverloadedMethodRecord>()) {
+      break;
+
+      foreach (OneMethodRecord m in olM.MethodList.As<MethodOverloadListRecord>(udtType.Pdb.PdbFile).Methods) {
+        MethodDecl? method = CreateMethodDeclaration(m, olM.Name.String);
         if (method is not null) {
-          @class = @class.AddMember(method);
+          csClass = csClass.AddMember(method);
         }
       }
     }
 
     // Nested types
-    foreach (TagRecord nested in fields
-               .OfType<NestedTypeRecord>()
-               .Where(n => !n.Type.IsSimple)
-               .Select(n => pdb.GetRecord(n.Type) as TagRecord)
-               .OfType<TagRecord>()
-               .Where(n => !n.IsForwardReference)
-            ) {
-      if (classRecord.Name.String.Contains('<')) {
-        // Skip template classes
+    if (udtType.ContainsNestedClass) {
+      foreach (NestedTypeRecord nested in pdbFieldList
+                 .OfType<NestedTypeRecord>()
+                 .Where(n => !n.Type.IsSimple)
+              ) {
+        // Must check that IsNested is false.
+        // For example, Array<String> may have a nested struct String, which refers to the top-level String class.
+        if (_pdb.GetType(nested.Type) is not PdbUdt { IsNested: true } nestedUdt) {
+          continue;
+        }
+
+        string fulName = GetQualifiedName(nestedUdt);
+
         continue;
-      }
 
-      MemberDeclarationSyntax memberDeclarationSyntax = CreateType(nested, pdb);
-      @class = @class.AddMember(memberDeclarationSyntax);
-    }
+        if (nested.Name.String.Contains('<')) {
+          // Skip template classes
+          continue;
+        }
 
-    return @class;
-  }
+        KeyValuePair<TypeIndex, PdbUdt> testUdt = default;
 
-  private static EnumDeclarationSyntax CreateType(EnumRecord enumRecord, PdbFile pdb) {
-    EnumDeclarationSyntax @enum = EnumDeclaration(enumRecord.Name.String.SanitizeName())
-      .AddAttributeLists(AttributeList(SingletonSeparatedList(CompGenAttribute)))
-      .WithModifiers(PublicKeywordMod)
-      .AddBaseListTypes(SimpleBaseType(ParseTypeName(
-        enumRecord.UnderlyingType.SimpleTypeName
-      )))
-      .WithLeadingTrivia(Comment($"/// Struct type: {enumRecord.Name.String} ({enumRecord.UniqueName})"));
-    ;
-
-    foreach (EnumeratorRecord enumFieldRecord in enumRecord.FieldList
-               .As<FieldListRecord>(pdb).Fields
-               .OfType<EnumeratorRecord>()) {
-      object? value = enumFieldRecord.Value;
-      EnumMemberDeclarationSyntax enumMember = EnumMemberDeclaration(enumFieldRecord.Name.String)
-        .WithEqualsValue(EqualsValueClause(LiteralExpression(
-            SyntaxKind.NumericLiteralExpression,
-            value switch {
-              int v => Literal(v),
-              uint v => Literal(v),
-              short v => Literal(v),
-              ushort v => Literal(v),
-              sbyte v => Literal(v),
-              byte v => Literal(v),
-              long v => Literal(v),
-              ulong v => Literal(v),
-              float v => Literal(v),
-              double v => Literal(v),
-              _ => throw new InvalidDataException(
-                $"Unexpected underlying type: {enumRecord.UnderlyingType.SimpleTypeName}")
+        if (nestedUdt is not { TagRecord.IsForwardReference: false }) {
+          foreach (PdbType pdbType in _pdb.AsEnumerable()) {
+            if (pdbType is PdbUdt { TagRecord.IsForwardReference: false } udt &&
+                udt.UniqueName == nested.Name.String) {
+              nestedUdt = udt;
+              break;
             }
-          )
-        ));
-      @enum = @enum.AddMember(enumMember);
-    }
+          }
+        }
 
-    return @enum;
-  }
+        if (nestedUdt is not null) {
+          if (nestedUdt.Name.Contains('<')) {
+            // Skip template classes
+            continue;
+          }
 
-  private static StructDeclarationSyntax CreateType(UnionRecord unionRecord, PdbFile pdb) {
-    // TODO: proper handling of Union type
-    var fields = unionRecord.FieldList.As<FieldListRecord>(pdb).Fields;
-    var s = fields
-      .Where(f => f is not (VirtualFunctionPointerRecord or BaseClassRecord or VirtualBaseClassRecord
-        or DataMemberRecord
-        or StaticDataMemberRecord or OneMethodRecord or OverloadedMethodRecord or NestedTypeRecord))
-      .Select(f => Comment($"// ({f.Kind} | {f.GetType().Name}) {f.ToString(pdb)}")).ToArray();
-    if (s.Length > 0) {
-      Console.ForegroundColor = ConsoleColor.Yellow;
-      Console.WriteLine($"Warning: Class {unionRecord.Name.String} has unhandled fields:");
-      foreach (SyntaxTrivia field in s) {
-        Console.WriteLine(field.ToString());
-      }
+          if (nestedUdt.TypeIndex == udtType.TypeIndex) {
+            Console.ForegroundColor = ConsoleColor.Yellow;
+            Console.WriteLine(
+              $"Warning: Skipping nested type {nestedUdt.Name} in {udtType.Name} because it is the same type as the parent.");
+            Console.ResetColor();
+            continue;
+          }
 
-      Console.ResetColor();
-    }
-
-    StructDeclarationSyntax @union = StructDeclaration(unionRecord.Name.String.SanitizeName())
-      .WithAttributeLists(ClassAttribute(unionRecord.Size))
-      .WithModifiers(TypeKeywordMod)
-      .WithLeadingTrivia(Comment($"/// Union type: {unionRecord.Name.String} ({unionRecord.UniqueName})"));
-
-    var baseClassRecords = fields.OfType<BaseClassRecord>();
-    int baseCount = baseClassRecords.Count();
-    if (baseCount != 0) {
-      if (baseCount > 1) {
-        Console.ForegroundColor = ConsoleColor.Yellow;
-        Console.WriteLine(
-          $"Warning: Union class {unionRecord.Name.String} has multiple base classes ({string.Join(", ", baseClassRecords.Select(b => b.Type.ToString(pdb)))}). This may not be supported in C#.");
-        Console.ResetColor();
-      }
-
-      @union = @union.WithBaseList(
-        BaseList(
-          SeparatedList<BaseTypeSyntax>(
-            baseClassRecords.Select(b => SimpleBaseType(IdentifierName(b.Type.ToString(pdb).SanitizeName())))
-          )
-        )
-      );
-    }
-
-    foreach (StaticDataMemberRecord staticF in fields.OfType<StaticDataMemberRecord>()) {
-      FieldDeclarationSyntax field = FieldDeclaration(
-          VariableDeclaration(IdentifierName(staticF.Type.ToString(pdb)))
-            .AddVariables(VariableDeclarator(staticF.Name.String)))
-        .WithModifiers(PublicKeywordMod);
-      @union = @union.AddMember(field);
-    }
-
-    foreach (DataMemberRecord f in fields.OfType<DataMemberRecord>()) {
-      FieldDeclarationSyntax field = CreateField(f, pdb);
-
-      @union = @union.AddMember(field);
-    }
-
-    foreach (OneMethodRecord m in fields.OfType<OneMethodRecord>()) {
-      BaseMethodDeclarationSyntax? method = CreateMethodDeclaration(m, pdb, m.Name.String);
-      if (method is not null) {
-        @union = @union.AddMember(method);
-      }
-    }
-
-    foreach (OverloadedMethodRecord olM in fields.OfType<OverloadedMethodRecord>()) {
-      foreach (OneMethodRecord m in olM.MethodList.As<MethodOverloadListRecord>(pdb).Methods) {
-        BaseMethodDeclarationSyntax? method = CreateMethodDeclaration(m, pdb, olM.Name.String);
-        if (method is not null) {
-          @union = @union.AddMember(method);
+          MemberDeclarationSyntax memberDeclarationSyntax = CreateType(nestedUdt);
+          csClass = csClass.AddMember(memberDeclarationSyntax);
         }
       }
     }
 
-    foreach (TagRecord nested in fields
-               .OfType<NestedTypeRecord>()
-               .Where(n => !n.Type.IsSimple)
-               .Select(n => pdb.GetRecord(n.Type) as TagRecord)
-               .OfType<TagRecord>()
-               .Where(n => !n.IsForwardReference)
-            ) {
-      MemberDeclarationSyntax memberDeclarationSyntax = CreateType(nested, pdb);
-      @union = @union.AddMember(memberDeclarationSyntax);
-    }
-
-    return @union;
+    return csClass;
   }
 
-  private static FieldDeclarationSyntax CreateField(DataMemberRecord fieldMember, PdbFile pdb) {
-    int offset = (int)fieldMember.FieldOffset;
-    AttributeSyntax fieldOffsetAttribute = CreateFieldOffsetAttribute(offset);
-    FieldDeclarationSyntax field = FieldDeclaration(
-        VariableDeclaration(IdentifierName(fieldMember.Type.ToString(pdb).SanitizeName()))
-          .AddVariables(VariableDeclarator(fieldMember.Name.String.SanitizeName())))
-      .AddAttributeLists(AttributeList(SingletonSeparatedList(fieldOffsetAttribute)))
-      .WithModifiers(PublicKeywordMod);
-    if (fieldMember.Attributes.MethodKind.HasFlag(MethodKind.Static)) {
-      field = field.AddModifiers(Token(SyntaxKind.StaticKeyword));
+  private EnumDeclarationSyntax CreateEnum(PdbEnumType enumType, string? name = null) {
+    name ??= GetOrCreateTypeName(enumType);
+
+    string underlying = GetOrCreateTypeName(enumType.UnderlyingType);
+    if (underlying == "bool") {
+      underlying = "byte";
     }
 
-    return field;
+    if (enumType.Values.Any(v => v.Value is uint and > int.MaxValue)) {
+      underlying = "uint";
+    }
+
+    EnumDeclarationSyntax csEnum = CreateEnumSyntax(enumType, name);
+    if (underlying != "int") {
+      csEnum = csEnum.AddBaseListTypes(SimpleBaseType(ParseTypeName(underlying)));
+    }
+
+    foreach (PdbEnumeratorValue enumValue in enumType.Values) {
+      EnumMemberDeclarationSyntax enumMember = CreateEnumMemberSyntax(enumValue);
+      csEnum = csEnum.AddMembers(enumMember);
+    }
+
+    return csEnum;
   }
 
-  private static BaseMethodDeclarationSyntax? CreateMethodDeclaration(OneMethodRecord methodRecord, PdbFile pdb,
-    string? name = null) {
+  private MethodDecl? CreateMethodDeclaration(OneMethodRecord methodRecord, string? name = null) {
     name ??= methodRecord.Name.String;
-    MemberFunctionRecord funcRecord = methodRecord.Type.As<MemberFunctionRecord>(pdb);
+    MemberFunctionRecord funcRecord = methodRecord.Type.As<MemberFunctionRecord>(PdbFile);
     bool isConstructor = funcRecord.Options.HasFlag(FunctionOptions.Constructor);
-    var args = funcRecord.ArgumentList.As<ArgumentListRecord>(pdb).Arguments;
+    var args = funcRecord.ArgumentList.As<ArgumentListRecord>(PdbFile).Arguments;
     bool hasProc = ProcedureHelper.Names.TryGetValue(methodRecord.Type, out ProcedureInfo pInfo);
-
 
     // Create parameters list
     int i = 0;
@@ -468,18 +509,19 @@ public static class SourceGen {
       i++;
       parameterSyntaxes.Add(
         Parameter(Identifier(arg))
-          .WithType(IdentifierName(typeIndex.ToString(pdb)))
+          // TODO: do NOT use typeIndex.ToString
+          .WithType(IdentifierName(typeIndex.ToString(PdbFile)))
       );
     }
 
-    BaseMethodDeclarationSyntax methodDeclaration;
+    MethodDecl methodDeclaration;
     if (isConstructor) {
       return null;
 
       // Constructor with parameter list
       methodDeclaration =
         ConstructorDeclaration(name)
-          .WithModifiers(TokenList(Token(SyntaxKind.PublicKeyword)))
+          .WithModifiers(TokenList(PubKw))
           .WithParameterList(ParameterList(SeparatedList(parameterSyntaxes)))
           .WithSemicolonToken(Token(SyntaxKind.SemicolonToken));
     }
@@ -493,23 +535,25 @@ public static class SourceGen {
     }
     else {
       methodDeclaration =
-        MethodDeclaration(IdentifierName(funcRecord.ReturnType.ToString(pdb).SanitizeName()), name)
-          .WithModifiers(TokenList(Token(SyntaxKind.PublicKeyword)))
+        // TODO: do NOT use typeIndex.ToString
+        MethodDeclaration(IdentifierName(funcRecord.ReturnType.ToString(PdbFile).SanitizeName()), name)
+          .WithModifiers(TokenList(PubKw))
           .WithParameterList(ParameterList(SeparatedList(parameterSyntaxes)))
           .WithSemicolonToken(Token(SyntaxKind.SemicolonToken));
 
       // Static method
       if (funcRecord.ThisType is { IsSimple: true, SimpleKind: SimpleTypeKind.Void }) {
         methodDeclaration = methodDeclaration
-          .AddModifiers(Token(SyntaxKind.StaticKeyword));
+          .AddModifiers(StaticKw);
       }
     }
 
-    string typeParams = string.Join(", ", args.Select(a => a.ToString(pdb).SanitizeName()));
+    // TODO: do NOT use typeIndex.ToString
+    string typeParams = string.Join(", ", args.Select(a => a.ToString(PdbFile).Sanitize()));
     var delegateParams = parameterSyntaxes.Select(p => Argument(IdentifierName(p.Identifier.Text)));
     if (hasProc) {
       string delegateBody =
-        $"((delegate* unmanaged<{typeParams}>)(ModuleBase + {pInfo.Procedure.Offset}))";
+        $"((delegate* unmanaged<{typeParams}>)(mioMemoryAddress + {pInfo.Procedure.Offset}))";
       methodDeclaration = methodDeclaration
         .WithExpressionBody(ArrowExpressionClause(
           InvocationExpression(IdentifierName(delegateBody))
@@ -536,95 +580,33 @@ public static class SourceGen {
     return methodDeclaration;
   }
 
-  private static readonly MemberDeclarationSyntax[] NsMembers = new MemberDeclarationSyntax[1];
-  private static readonly EnumMemberDeclarationSyntax[] EuMembers = new EnumMemberDeclarationSyntax[1];
-
-  extension(string str) {
-    private string Sanitize() {
-      return str
-        .Replace("`anonymous-namespace'::", "")
-        .Replace("::", "__")
-        .Replace('-', '_')
-        .Replace('<', '_')
-        .Replace(" >", "_")
-        .Replace("> ", "_")
-        .Replace('>', '_')
-        .Replace("&&", "*")
-        .Replace("&", "*")
-        .Replace("**", "*")
-        // .Replace("*", "_ptr")
-        // .Replace("&", "_ref")
-        .Replace(' ', '_')
-        .Replace(',', '_')
-        .Replace('(', '_')
-        .Replace(')', '_')
-        .Replace('[', '_')
-        .Replace(']', '_')
-        .Replace('`', '_')
-        .Replace('\'', '_');
+  private bool TryResolveType(PdbType orig, [NotNullWhen(true)] out PdbType? resolved) {
+    resolved = null;
+    if (orig is not PdbUdt { TagRecord.IsForwardReference: true } udt) {
+      resolved = null;
+      return false;
     }
 
-    private string SanitizeName() {
-      bool endsInPtr = str.EndsWith('*') || str.EndsWith('&');
-      string result;
-      if (endsInPtr) {
-        result = str[..^1]
-            .Sanitize()
-            .Replace("~", "_dtor")
-            .Replace("*", "_ptr")
-            .Replace("&", "_ref")
-          + '*';
-      }
-      else {
-        result = str
-          .Sanitize()
-          .Replace("~", "_dtor")
-          .Replace("*", "_ptr")
-          .Replace("&", "_ref");
-      }
-
-      if (result == "String_ptr") {
-        ;
-      }
-
-      return result;
-    }
+    resolved = _pdb.UserDefinedTypes
+      .OfType<PdbUdt>()
+      .LastOrDefault(r => !r.TagRecord.IsForwardReference && r.UniqueName == udt.TagRecord.UniqueName.String);
+    return resolved is not null;
   }
 
-  extension(FileScopedNamespaceDeclarationSyntax ns) {
-    private void WriteToFile(string filePath) {
-      using StreamWriter writer = new(filePath);
-      ns.NormalizeWhitespace().WriteTo(writer);
+  private static int GetPointerDepth(PdbPointerType type) => GetPointerDepthAndElement(type, out _);
+
+  private static int GetPointerDepthAndElement(PdbPointerType type, out PdbType element) {
+    element = type;
+    int depth = 0;
+    while (element is PdbPointerType pointer) {
+      depth++;
+      element = pointer.ElementType;
     }
+
+    return depth;
   }
 
-
-  // ReSharper disable SuggestVarOrType_SimpleTypes
-  extension(FileScopedNamespaceDeclarationSyntax ns) {
-    public FileScopedNamespaceDeclarationSyntax AddMember(MemberDeclarationSyntax member) {
-      NsMembers[0] = member;
-      ns = ns.AddMembers(NsMembers);
-      NsMembers[0] = null!;
-      return ns;
-    }
-  }
-
-  extension(StructDeclarationSyntax structDecl) {
-    public StructDeclarationSyntax AddMember(MemberDeclarationSyntax member) {
-      NsMembers[0] = member;
-      structDecl = structDecl.AddMembers(NsMembers);
-      NsMembers[0] = null!;
-      return structDecl;
-    }
-  }
-
-  extension(EnumDeclarationSyntax enumDecl) {
-    public EnumDeclarationSyntax AddMember(EnumMemberDeclarationSyntax member) {
-      EuMembers[0] = member;
-      enumDecl = enumDecl.AddMembers(EuMembers);
-      EuMembers[0] = null!;
-      return enumDecl;
-    }
-    // ReSharper restore SuggestVarOrType_SimpleTypes
+  public void Dispose() {
+    _pdb.Dispose();
   }
 }

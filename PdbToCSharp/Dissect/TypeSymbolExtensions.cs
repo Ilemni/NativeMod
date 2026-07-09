@@ -1,6 +1,5 @@
 ﻿using System.Text;
 using JetBrains.Annotations;
-using Microsoft.Extensions.ObjectPool;
 using SharpPdb.Windows;
 using SharpPdb.Windows.SymbolRecords;
 using SharpPdb.Windows.TypeRecords;
@@ -8,9 +7,13 @@ using SharpPdb.Windows.TypeRecords;
 // ReSharper disable MemberCanBePrivate.Global
 // ReSharper disable UnusedParameter.Global
 
-namespace PdbToCSharp;
+namespace PdbToCSharp.Dissect;
 
-internal static partial class TypeRecordExtensions {
+internal static class TypeSymbolExtensions {
+  [MustDisposeResource]
+  private static TypeRecordExtensions.RentedState<StringBuilder> Rent(out StringBuilder sb) =>
+    TypeRecordExtensions.Rent(out sb);
+
   public static string ToString(this AnnotationReferenceSymbol s, PdbFile pdb) {
     return
       $"/* Annotation Reference: " +
@@ -117,6 +120,7 @@ internal static partial class TypeRecordExtensions {
       if (notFirst) {
         sb.Append(", ");
       }
+
       sb.Append($"{localVariableAddressGap.GapStartOffset:X4}:{localVariableAddressGap.Range:X4}");
       notFirst = true;
     }
@@ -139,6 +143,7 @@ internal static partial class TypeRecordExtensions {
       if (notFirst) {
         sb.Append(", ");
       }
+
       sb.Append($"{localVariableAddressGap.GapStartOffset:X4}:{localVariableAddressGap.Range:X4}");
       notFirst = true;
     }
@@ -160,6 +165,7 @@ internal static partial class TypeRecordExtensions {
       if (notFirst) {
         sb.Append(", ");
       }
+
       sb.Append($"{localVariableAddressGap.GapStartOffset:X4}:{localVariableAddressGap.Range:X4}");
       notFirst = true;
     }
@@ -182,6 +188,7 @@ internal static partial class TypeRecordExtensions {
       if (notFirst) {
         sb.Append(", ");
       }
+
       sb.Append($"{localVariableAddressGap.GapStartOffset:X4}:{localVariableAddressGap.Range:X4}");
       notFirst = true;
     }
@@ -253,8 +260,10 @@ internal static partial class TypeRecordExtensions {
       .AppendIf(s.PaddingFrameBytes != 0, $"PaddingBytes = {s.PaddingFrameBytes:X4} ")
       .AppendIf(s.OffsetToPadding != 0, $"OffsetToPadding = {s.OffsetToPadding:X8} ")
       .AppendIf(s.OffsetOfExceptionHandler != 0, $"OffsetOfExceptionHandler = {s.OffsetOfExceptionHandler:X8} ")
-      .AppendIf(s.SectionIdOfExceptionHandler != 0, $"SectionIdOfExceptionHandler = {s.SectionIdOfExceptionHandler:X8} ")
-      .AppendIf(s.BytesOfCalleeSavedRegisters != 0, $"BytesOfCalleeSavedRegisters = {s.BytesOfCalleeSavedRegisters:X4} ")
+      .AppendIf(s.SectionIdOfExceptionHandler != 0,
+        $"SectionIdOfExceptionHandler = {s.SectionIdOfExceptionHandler:X8} ")
+      .AppendIf(s.BytesOfCalleeSavedRegisters != 0,
+        $"BytesOfCalleeSavedRegisters = {s.BytesOfCalleeSavedRegisters:X4} ")
       .Append("*/")
       .ToString();
   }

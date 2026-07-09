@@ -2,14 +2,14 @@
 using JetBrains.Annotations;
 using Microsoft.Extensions.ObjectPool;
 
-namespace PdbToCSharp;
+namespace PdbToCSharp.Dissect;
 
 internal static partial class TypeRecordExtensions {
   // This partial is an attempt to make string creation a bit cheaper, by resuing StringBuilder instances.
   private static readonly ObjectPool<StringBuilder> Pool = ObjectPool.Create<StringBuilder>();
 
   [MustDisposeResource]
-  private static RentedState<StringBuilder> Rent(out StringBuilder sb) {
+  internal static RentedState<StringBuilder> Rent(out StringBuilder sb) {
     sb = Pool.Get();
     RentedState<StringBuilder> rent = new(sb, ClearAction);
     return rent;
@@ -20,7 +20,7 @@ internal static partial class TypeRecordExtensions {
     }
   }
 
-  private ref struct RentedState<T>(T value, Action<T>? returnAction) : IDisposable where T : class {
+  internal ref struct RentedState<T>(T value, Action<T>? returnAction) : IDisposable where T : class {
     private bool _isReturned;
 
     void IDisposable.Dispose() {
@@ -36,12 +36,6 @@ internal static partial class TypeRecordExtensions {
   private static string? _currentMethodOverloadName;
 
   extension(StringBuilder sb) {
-    private StringBuilder AppendIf(bool condition, ReadOnlySpan<char> value) {
-      if (condition) {
-        sb.Append(value);
-      }
-
-      return sb;
-    }
+    internal StringBuilder AppendIf(bool condition, ReadOnlySpan<char> value) => condition ? sb.Append(value) : sb;
   }
 }

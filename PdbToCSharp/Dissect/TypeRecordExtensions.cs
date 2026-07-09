@@ -1,13 +1,11 @@
 ﻿using System.Text;
-using JetBrains.Annotations;
-using Microsoft.Extensions.ObjectPool;
 using SharpPdb.Windows;
 using SharpPdb.Windows.TypeRecords;
 
 // ReSharper disable MemberCanBePrivate.Global
 // ReSharper disable UnusedParameter.Global
 
-namespace PdbToCSharp;
+namespace PdbToCSharp.Dissect;
 
 internal static partial class TypeRecordExtensions {
   public static string ToString(this ArgumentListRecord argumentList, PdbFile pdb) {
@@ -264,9 +262,11 @@ internal static partial class TypeRecordExtensions {
   }
 
   public static string ToString(this OverloadedMethodRecord overloadedMethodRecord, PdbFile pdb) {
-    using var _ = new DeferRestore<string?>(ref _currentMethodOverloadName);
+    string? oldName = _currentMethodOverloadName;
     _currentMethodOverloadName = overloadedMethodRecord.Name.String;
-    return overloadedMethodRecord.MethodList.As<MethodOverloadListRecord>(pdb).ToString(pdb);
+    string result = overloadedMethodRecord.MethodList.As<MethodOverloadListRecord>(pdb).ToString(pdb);
+    _currentMethodOverloadName = oldName;
+    return result;
   }
 
   public static string ToString(this PointerRecord pointerRecord, PdbFile pdb) {

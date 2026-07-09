@@ -29,7 +29,7 @@ public static class ProcedureHelper {
     }
 
     Names.Clear();
-    Program.ReplaceNullSymbols(pdb);
+    ReplaceNullSymbols(pdb);
     List<(TypeIndex, string)> paramNamesList = [];
     foreach (ProcedureSymbol proc in pdb.DbiStream.Modules
                .Where(m => m.LocalSymbolStream is not null)
@@ -104,6 +104,21 @@ public static class ProcedureHelper {
           Console.WriteLine(
             $"Warning: {untypedRecord.Kind} Procedure {procName} with {paramCount} args has extra named args, total {paramNames.Length}");
           Console.ResetColor();
+        }
+      }
+    }
+  }
+
+  /// Ensure all members not null
+  /// SymbolRecord.Children property WILL throw if any children are null
+  internal static void ReplaceNullSymbols(PdbFile pdb) {
+    foreach (SymbolStream mSymbols in pdb.DbiStream.Modules
+               .Select(m => m.LocalSymbolStream)
+               .Where(s => s is not null)) {
+      var cache = mSymbols.GetSymbolsCache();
+      for (int i = 0; i < mSymbols.References.Count; i++) {
+        if (mSymbols[i] is null) {
+          cache[i] = new NullSymbol(mSymbols, i);
         }
       }
     }
