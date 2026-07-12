@@ -289,12 +289,7 @@ public sealed partial class SourceGen : IDisposable {
 
   private StructDeclarationSyntax CreateStruct(CsStructure csStruct) {
     StructDeclarationSyntax csClass = CreateStructSyntax(csStruct);
-    if (csStruct.SelfName == "_Minmax_traits_1") {
-      ;
-    }
-
     if (csStruct.AllFields.Count == 0) {
-      csClass = csClass.WithSemicolonToken(Token(SyntaxKind.SemicolonToken));
       return csClass;
     }
 
