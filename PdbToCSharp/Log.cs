@@ -1,15 +1,15 @@
 ﻿namespace PdbToCSharp;
 
 public static class Log {
-  public static void Step(string s) {
+  public static void Step(string message) {
     Console.ForegroundColor = ConsoleColor.Green;
-    Console.WriteLine($"[STEP] {s}");
+    Console.WriteLine($"[STEP] {message}");
     Console.ResetColor();
   }
 
-  public static void Info(string s) {
+  public static void Info(string message) {
     Console.ForegroundColor = ConsoleColor.Cyan;
-    Console.WriteLine($"[INFO] {s}");
+    Console.WriteLine($"[INFO] {message}");
     Console.ResetColor();
   }
 

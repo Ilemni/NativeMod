@@ -30,7 +30,9 @@ internal static class SourceGenExtensions {
         return sanitized;
       }
 
-      str = str.Replace("`anonymous-namespace'::", "")
+      str = str
+        .Replace("`anonymous-namespace'::", "")
+        .Replace("`anonymous namespace'::", "")
         .Replace("::", "__")
         .Replace("/*", "")
         .Replace("*/", "");

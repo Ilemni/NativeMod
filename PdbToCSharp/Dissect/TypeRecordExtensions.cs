@@ -140,11 +140,11 @@ internal static partial class TypeRecordExtensions {
     pdb.GetRecord<FieldListRecord>(listContinuationRecord.ContinuationIndex).ToString(pdb);
 
   public static string ToString(this MemberFunctionIdRecord memberFunctionIdRecord, PdbFile pdb) {
+    MemberFunctionRecord memberFunctionRecord = pdb.GetRecord<MemberFunctionRecord>(memberFunctionIdRecord.FunctionType);
     return
       $"/* MemberFunctionId: " +
+      $"Type = {memberFunctionRecord.ToString(pdb)}, " +
       $"Name = {memberFunctionIdRecord.Name.String}, " +
-      $"Type = {memberFunctionIdRecord.FunctionType.ToString(pdb)}, " +
-      $"ClassType = {memberFunctionIdRecord.ClassType.ToString(pdb)} " +
       $"*/";
   }
 

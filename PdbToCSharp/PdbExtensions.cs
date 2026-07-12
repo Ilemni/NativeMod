@@ -34,6 +34,7 @@ internal static class PdbExtensions {
     public bool TryGetType<T>(int index, [NotNullWhen(true)] out T? type) where T : PdbType =>
       reader.TryGetType(TypeIndex.FromArrayIndex(index), out type);
 
+    // ReSharper disable once InconsistentNaming
     public IEnumerable<PdbUserDefinedType> UDTs => reader.UserDefinedTypes.Cast<PdbUserDefinedType>();
 
 
@@ -53,6 +54,8 @@ internal static class PdbExtensions {
 
     public TypeRecord? TryGetRecord(TypeIndex typeIndex, TpiStream? stream = null) =>
       !typeIndex.IsSimple ? pdb.GetRecord(typeIndex, stream) : null;
+
+    public T? TryGetRecord<T>(TypeIndex typeIndex, TpiStream? stream = null) where T : TypeRecord => pdb.TryGetRecord(typeIndex, stream) as T;
   }
 
   extension(SymbolStream symbols) {

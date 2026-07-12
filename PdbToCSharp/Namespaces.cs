@@ -1,5 +1,7 @@
-﻿using Microsoft.CodeAnalysis.CSharp.Syntax;
-using SharpPdb.Native.Types;
+﻿using System.Runtime.InteropServices;
+using Microsoft.CodeAnalysis.CSharp;
+using Microsoft.CodeAnalysis.CSharp.Syntax;
+using PdbToCSharp.Types;
 
 namespace PdbToCSharp;
 
@@ -9,119 +11,86 @@ internal sealed class Namespaces {
   }
 
   public Namespaces(string namespaceName) {
-    _classNs = new Item(SourceGen.CreateNamespaceSyntax(namespaceName), "GeneratedClasses.cs");
-    _arrayNs = _classNs with { OutputName = "GeneratedArrayTypes.cs" };
-    _enumNs = _classNs with { OutputName = "GeneratedEnums.cs" };
-    _unionNs = _classNs with { OutputName = "GeneratedUnions.cs" };
-    _templateNs = _classNs with { OutputName = "GeneratedTemplateClasses.cs" };
-    _templateUnionNs = _classNs with { OutputName = "GeneratedTemplateUnion.cs" };
-    _stdNs = _classNs with { OutputName = "GeneratedStdClasses.cs" };
-    _imNs = _classNs with { OutputName = "GeneratedImguiClasses.cs" };
-    _hbNs = _classNs with { OutputName = "GeneratedHbClasses.cs" };
-    _d3DNs = _classNs with { OutputName = "GeneratedD3dClasses.cs" };
-    _pfNs = _classNs with { OutputName = "GeneratedPlayfabClasses.cs" };
-    _fmodNs = _classNs with { OutputName = "GeneratedFmodClasses.cs" };
-    _jsonNs = _classNs with { OutputName = "GeneratedJsonClasses.cs" };
-    _internalNs = _classNs with { OutputName = "GeneratedInternalClasses.cs" };
-    _cgNs = _classNs with { OutputName = "GeneratedCppGeneratedClasses.cs" };
+    _namespaceName = namespaceName;
+    _baseNs = SourceGen.CreateNamespaceSyntax(namespaceName);
+    _rootClassNamespace = new Item(_baseNs, "Generated__Root_Classes.cs");
+    _arrayNs = _rootClassNamespace with { OutputName = "Generated__Root_InlineArrays.cs" };
+    _rootEnumNamespace = _rootClassNamespace with { OutputName = "Generated__Root_Enums.cs" };
+    _rootUnionNamespace = _rootClassNamespace with { OutputName = "Generated__Root_Unions.cs" };
+    _rootTemplateClassNamespace = _rootClassNamespace with { OutputName = "Generated__Root_TemplateClasses.cs" };
+    _rootTemplateUnionNamespace = _rootClassNamespace with { OutputName = "Generated__Root_TemplateUnions.cs" };
   }
 
-  private Item _classNs;
+  private readonly string _namespaceName;
+
+  private readonly FileScopedNamespaceDeclarationSyntax _baseNs;
+
+  private readonly Dictionary<string, Item> _namespaceMap = [];
+  private Item _rootClassNamespace;
+  private Item _rootEnumNamespace;
+  private Item _rootUnionNamespace;
+  private Item _rootTemplateClassNamespace;
+  private Item _rootTemplateUnionNamespace;
   private Item _arrayNs; // Inline arrays
-  private Item _enumNs; // Enums
-  private Item _unionNs; // Unions
-  private Item _templateNs; // Template classes
-  private Item _templateUnionNs; // Template unions
-  private Item _stdNs; // std:: classes
-  private Item _imNs; // ImGui classes
-  private Item _hbNs; // HarfBuzz classes
-  private Item _d3DNs; // Direct3D classes
-  private Item _pfNs; // PlayFab classes
-  private Item _fmodNs; // FMOD classes
-  private Item _jsonNs; // JSON classes
-  private Item _internalNs; // Internal classes
-  private Item _cgNs;
 
   public ref FileScopedNamespaceDeclarationSyntax InlineArrayNs => ref _arrayNs.Ns;
-  public ref FileScopedNamespaceDeclarationSyntax EnumNs => ref _enumNs.Ns;
+  public ref FileScopedNamespaceDeclarationSyntax EnumNs => ref _rootEnumNamespace.Ns;
 
-  public ref FileScopedNamespaceDeclarationSyntax GetMatching(PdbUserDefinedType udt) {
-    if (udt is PdbEnumType) {
-      return ref _enumNs.Ns;
-    }
-
-    string name = udt.Name;
-    if (name.StartsWith('_')) {
-      return ref _internalNs.Ns;
-    }
-
-    if (name.StartsWith('$')) {
-      return ref _cgNs.Ns;
-    }
-
-    if (name.Contains('<')) {
-      if (udt is PdbUnionType) {
-        return ref _templateUnionNs.Ns;
+  public ref FileScopedNamespaceDeclarationSyntax GetMatching(CsUdt udt) {
+    string? csNamespace = udt.Namespace;
+    if (csNamespace is not null) {
+      if (!_namespaceMap.TryGetValue(csNamespace, out Item item)) {
+        item = new Item(_baseNs.WithName(SyntaxFactory.ParseName(_namespaceName + '.' + csNamespace)), $"Generated_{csNamespace.Replace('.', '_')}.cs");
+        _namespaceMap[csNamespace] = item;
       }
 
-      return ref _templateNs.Ns;
+      return ref CollectionsMarshal.GetValueRefOrAddDefault(_namespaceMap, csNamespace, out bool _).Ns;
     }
 
-    if (MatchName(name, "std::")) {
-      return ref _stdNs.Ns;
+    string origName = udt.Record.Name.String;
+    if (udt is CsEnum) {
+      return ref EnumNs;
     }
 
-    if (MatchName(name, "ImGui::") || name.StartsWith("Im") && name.Length > 2 && char.IsUpper(name[2])) {
-      return ref _imNs.Ns;
+    // TODO: Replace all of the above fields with a dictionary.
+    //  Probably not needed, if we eventually just Parallel.ForEach over things and write them to their own files.
+    //  In that case, this type will be deleted.
+    string? name = udt.Namespace;
+    if (name is null) {
+      if (udt is CsUnion) {
+        return ref _rootUnionNamespace.Ns;
+      }
+
+      return ref _rootClassNamespace.Ns;
     }
 
-    if (MatchName(name, "hb_")) {
-      return ref _hbNs.Ns;
+    if (origName.Contains('<')) {
+      if (udt is CsUnion) {
+        return ref _rootTemplateUnionNamespace.Ns;
+      }
+
+      return ref _rootTemplateClassNamespace.Ns;
     }
 
-    if (MatchName(name, "DXGI", "D3D", "D2D")) {
-      return ref _d3DNs.Ns;
+    if (udt is CsUnion) {
+      return ref _rootUnionNamespace.Ns;
     }
 
-    if (MatchName(name, "PlayFab")) {
-      return ref _pfNs.Ns;
-    }
-
-    if (MatchName(name, "FMOD")) {
-      return ref _fmodNs.Ns;
-    }
-
-    if (MatchName(name, "Json")) {
-      return ref _jsonNs.Ns;
-    }
-
-    if (udt is PdbUnionType) {
-      return ref _unionNs.Ns;
-    }
-
-    return ref _classNs.Ns;
+    return ref _rootClassNamespace.Ns;
   }
 
   public void WriteAllToFiles(string outputPath) {
-    Item[] arr = [
-      _arrayNs,
-      _classNs,
-      _enumNs,
-      _unionNs,
-      _templateNs,
-      _templateUnionNs,
-      _stdNs,
-      _imNs,
-      _hbNs,
-      _d3DNs,
-      _pfNs,
-      _fmodNs,
-      _jsonNs,
-      _internalNs,
-      _cgNs
-    ];
+    var arr = _namespaceMap.Values
+      .Append(_arrayNs)
+      .Append(_rootClassNamespace)
+      .Append(_rootEnumNamespace)
+      .Append(_rootUnionNamespace)
+      .Append(_rootTemplateClassNamespace)
+      .Append(_rootTemplateUnionNamespace);
     Parallel.ForEach(arr, item => {
-      item.Ns.WriteToFile(Path.Join(outputPath, item.OutputName));
+      if (item.Ns.Members.Any()) {
+        item.Ns.WriteToFile(Path.Join(outputPath, item.OutputName));
+      }
     });
   }
 

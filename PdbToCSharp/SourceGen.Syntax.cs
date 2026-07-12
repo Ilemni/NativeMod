@@ -1,9 +1,9 @@
-﻿using System.Diagnostics;
+﻿using System.CodeDom.Compiler;
+using System.Diagnostics;
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
-using SharpPdb.Native;
-using SharpPdb.Native.Types;
+using PdbToCSharp.Types;
 using SharpPdb.Windows;
 using SharpPdb.Windows.TypeRecords;
 using static Microsoft.CodeAnalysis.CSharp.SyntaxFactory;
@@ -14,7 +14,7 @@ public partial class SourceGen {
   // Attributes
   private static readonly AttributeListSyntax CompGenAttribute =
     AttributeList(
-      SingletonSeparatedList(Attribute(IdentifierName("CompilerGenerated"))));
+      SingletonSeparatedList(Attribute(IdentifierName("GeneratedCode(\"PdbToCSharp\", \"0.1.0.0\")"))));
 
   private static SyntaxList<AttributeListSyntax> ClassAttribute(ulong structSize) =>
     List<AttributeListSyntax>(
@@ -61,7 +61,7 @@ public partial class SourceGen {
   private static readonly SyntaxTokenList PubStatic = [PubKw, StaticKw];
   private static readonly SyntaxTokenList PubConst = [PubKw, Token(SyntaxKind.ConstKeyword)];
   private static readonly SyntaxTokenList PubUnsafe = [PubKw, Token(SyntaxKind.UnsafeKeyword)];
-  private static readonly SyntaxTokenList StructKws = PubUnsafe/*.Add(PartialKw)*/;
+  private static readonly SyntaxTokenList StructKws = PubUnsafe /*.Add(PartialKw)*/;
 
   // Creating Syntax Nodes
   internal static FileScopedNamespaceDeclarationSyntax CreateNamespaceSyntax(string namespaceName) {
@@ -82,7 +82,7 @@ public partial class SourceGen {
           TriviaList()));
   }
 
-  private static StructDeclarationSyntax CreateInlineArraySyntax(PdbArrayType arr, string arrayName,
+  private static StructDeclarationSyntax CreateInlineArraySyntax(CsArray arr, string arrayName,
     string elementName, ulong count) {
     const string fieldName = "element0";
 
@@ -98,27 +98,27 @@ public partial class SourceGen {
               .WithVariables(SingletonSeparatedList(VariableDeclarator(fieldName))))
           .WithModifiers(TokenList(Token(SyntaxKind.PrivateKeyword)))
       ))
-      .WithLeadingTrivia(Comment($"/// Inline array type: {arr.Name}"));
+      .WithLeadingTrivia(Comment($"/// Inline array type: {arr.FullName}"));
     return csArray;
   }
 
-  private static StructDeclarationSyntax CreateStructSyntax(PdbUserDefinedType udtType, string name) {
-    StructDeclarationSyntax csClass = StructDeclaration(name)
+  private static StructDeclarationSyntax CreateStructSyntax(CsStructure udtType) {
+    StructDeclarationSyntax csClass = StructDeclaration(udtType.SelfName)
       .WithAttributeLists(ClassAttribute(udtType.Size))
       .WithModifiers(StructKws)
       .WithLeadingTrivia(Comment(
-        $"/// {(udtType is PdbClassType ? "struct" : "union")} type: {udtType.Name} ({udtType.TypeIndex})"));
+        $"/// {(udtType is CsStruct ? "struct" : "union")} type: {udtType.Record.Name} ({udtType.TypeIndex})"));
     return csClass;
   }
 
-  private static EnumDeclarationSyntax CreateEnumSyntax(PdbEnumType enumType, string name) {
-    return EnumDeclaration(name)
+  private static EnumDeclarationSyntax CreateEnumSyntax(CsEnum enumType) {
+    return EnumDeclaration(enumType.SelfName)
       .WithAttributeLists([CompGenAttribute])
       .WithModifiers(Pub)
-      .WithLeadingTrivia(Comment($"/// Enum type: {enumType.Name} ({enumType.UniqueName})"));
+      .WithLeadingTrivia(Comment($"/// Enum type: {enumType.Record.Name} ({enumType.Record.UniqueName})"));
   }
 
-  private static EnumMemberDeclarationSyntax CreateEnumMemberSyntax(PdbEnumeratorValue enumValue) {
+  private static EnumMemberDeclarationSyntax CreateEnumMemberSyntax(CsEnumField enumValue) {
     EnumMemberDeclarationSyntax enumMember = EnumMemberDeclaration(enumValue.Name)
       .WithEqualsValue(EqualsValueClause(
         enumValue.Value is bool b
@@ -136,14 +136,16 @@ public partial class SourceGen {
               ulong v => Literal(v),
               float v => Literal(v),
               double v => Literal(v),
-              _ => throw new UnreachableException($"Unexpected enum value type: {enumValue.Value.GetType().Name} for {enumValue.Name}")
+              _ => throw new UnreachableException(
+                $"Unexpected enum value type: {enumValue.Value.GetType().Name} for {enumValue.Name}")
             }
           )
       ));
     return enumMember;
   }
 
-  private static FieldDeclarationSyntax CreateConstFieldSyntax(PdbTypeConstant constant, string fieldTypeName, string value) {
+  private static FieldDeclarationSyntax CreateConstFieldSyntax(CsConstantField constant, string fieldTypeName,
+    string value) {
     return FieldDeclaration(
         VariableDeclaration(IdentifierName(fieldTypeName))
           .WithVariables(
@@ -151,12 +153,13 @@ public partial class SourceGen {
               VariableDeclarator(constant.Name.EscapeField())
                 .WithInitializer(
                   EqualsValueClause(
-                    IdentifierName(constant.Type.TypeIndex.IsSimple ? value : $"({fieldTypeName}){value}")
+                    IdentifierName(constant.Constant.TypeIndex.IsSimple ? value : $"({fieldTypeName}){value}")
                   )))))
       .WithModifiers(PubConst);
   }
 
-  private static PropertyDeclarationSyntax CreateStaticField(PdbTypeRegularStaticField regularStaticField, string fieldTypeName) {
+  private static PropertyDeclarationSyntax CreateStaticField(CsRegularStaticField regularStaticField,
+    string fieldTypeName) {
     return PropertyDeclaration(IdentifierName(fieldTypeName), Identifier(regularStaticField.Name.EscapeField()))
       .WithModifiers(PubStatic)
       .WithExpressionBody(
@@ -166,24 +169,25 @@ public partial class SourceGen {
       .WithSemicolonToken(Token(SyntaxKind.SemicolonToken));
   }
 
-  private static FieldDeclarationSyntax CreateInstanceFieldSyntax(PdbTypeField field, string fieldName) {
+  private static FieldDeclarationSyntax CreateInstanceFieldSyntax(CsInstanceField field) {
     AttributeListSyntax fieldOffsetAttribute = CreateFieldOffsetAttribute((int)field.Offset);
     return FieldDeclaration(
-        VariableDeclaration(IdentifierName(fieldName))
+        VariableDeclaration(IdentifierName(field.FieldType.FullName))
           .AddVariables(VariableDeclarator(field.Name.SanitizeName().EscapeField())))
       .AddAttributeLists(fieldOffsetAttribute)
-      .WithModifiers(field.Access == MemberAccess.Public ? Pub : Private)
+      .WithModifiers(field.Record.Attributes.Access == MemberAccess.Public ? Pub : Private)
       .WithLeadingTrivia(Comment(
-        field is PdbTypeBitField bf
+        /*field is PdbTypeBitField bf
           ? $"/// BitField: {bf.Type.Name} (TypeIndex: {bf.Type.TypeIndex}) (Pos:{bf.Offset} Off:{bf.BitOffset} Size:{bf.BitSize})"
-          : $"/// Type: {field.Type.Name} (TypeIndex: {field.Type.TypeIndex}) {(field.Type is PdbUserDefinedType { TagRecord.IsForwardReference: true } ? "(Forward Reference)" : "")}"
+          :*/
+        $"/// Type: {field.FieldType.FullName} (TypeIndex: {field.Type}) {(field.FieldType is CsUdt { Record.IsForwardReference: true } ? "(Forward Reference)" : "")}"
       ));
   }
 
-  private static FieldDeclarationSyntax CreateBaseTypeFieldSyntax(PdbTypeBaseClass baseClass, string name, int? i) {
-    AttributeListSyntax fieldOffsetAttribute = CreateFieldOffsetAttribute((int)baseClass.Offset);
+  private static FieldDeclarationSyntax CreateBaseTypeFieldSyntax(CsBaseClass baseClass, int? i) {
+    AttributeListSyntax fieldOffsetAttribute = CreateFieldOffsetAttribute((int)baseClass.Record.Offset);
     FieldDeclarationSyntax field = FieldDeclaration(
-        VariableDeclaration(IdentifierName(name))
+        VariableDeclaration(IdentifierName(baseClass.BaseClass.FullName))
           .AddVariables(VariableDeclarator(i is not null ? $"Base{i + 1}" : "Base")))
       .WithAttributeLists([fieldOffsetAttribute])
       .WithModifiers(Pub);
@@ -191,86 +195,101 @@ public partial class SourceGen {
     return field;
   }
 
-  public static readonly Dictionary<TypeIndex, string> BuiltinTypeNames = new() {
-    [new TypeIndex(0u)] = "<no type>", // <no type> (None | Direct)
-    [new TypeIndex(3)] = "void", // void (Void | Direct)
-    [new TypeIndex(8)] = "uint", // HRESULT (HResult | Direct)
-    [new TypeIndex(16)] = "sbyte", // signed char (SignedCharacter | Direct)
-    [new TypeIndex(17)] = "short", // short (Int16Short | Direct)
-    [new TypeIndex(18)] = "int", // long (Int32Long | Direct)
-    [new TypeIndex(19)] = "long", // __int64 (Int64Quad | Direct)
-    [new TypeIndex(32)] = "ushort", // unsigned char (UnsignedCharacter | Direct)
-    [new TypeIndex(33)] = "ushort", // unsigned short (UInt16Short | Direct)
-    [new TypeIndex(34)] = "uint", // unsigned long (UInt32Long | Direct)
-    [new TypeIndex(35)] = "ulong", // unsigned __int64 (UInt64Quad | Direct)
-    [new TypeIndex(48)] = "bool", // bool (Boolean8 | Direct)
-    [new TypeIndex(49)] = "ushort", // __bool16 (Boolean16 | Direct)
-    [new TypeIndex(50)] = "uint", // __bool32 (Boolean32 | Direct)
-    [new TypeIndex(51)] = "ulong", // __bool64 (Boolean64 | Direct)
-    [new TypeIndex(64)] = "float", // float (Float32 | Direct)
-    [new TypeIndex(65)] = "double", // double (Float64 | Direct)
-    // [new TypeIndex(66)] = "long double", // long double (Float80 | Direct)
-    // [new TypeIndex(67)] = "__float128", // __float128 (Float128 | Direct)
-    // [new TypeIndex(68)] = "__float48", // __float48 (Float48 | Direct)
-    [new TypeIndex(69)] = "float", // float (Float32PartialPrecision | Direct)
-    [new TypeIndex(70)] = "single", // __half (Float16 | Direct)
-    // [new TypeIndex(80)] = "_Complex float", // _Complex float (Complex32 | Direct)
-    // [new TypeIndex(81)] = "_Complex double", // _Complex double (Complex64 | Direct)
-    // [new TypeIndex(82)] = "_Complex long double", // _Complex long double (Complex80 | Direct)
-    // [new TypeIndex(83)] = "_Complex __float128", // _Complex __float128 (Complex128 | Direct)
-    [new TypeIndex(104)] = "sbyte", // __int8 (SByte | Direct)
-    [new TypeIndex(105)] = "byte", // unsigned __int8 (Byte | Direct)
-    [new TypeIndex(112)] = "byte", // char (NarrowCharacter | Direct)
-    [new TypeIndex(113)] = "char", // wchar_t (WideCharacter | Direct)
-    [new TypeIndex(114)] = "short", // __int16 (Int16 | Direct)
-    [new TypeIndex(115)] = "ushort", // unsigned __int16 (UInt16 | Direct)
-    [new TypeIndex(116)] = "int", // int (Int32 | Direct)
-    [new TypeIndex(117)] = "uint", // unsigned (UInt32 | Direct)
-    [new TypeIndex(118)] = "long", // __int64 (Int64 | Direct)
-    [new TypeIndex(119)] = "ulong", // unsigned __int64 (UInt64 | Direct)
-    // [new TypeIndex(120)] = "__int128", // __int128 (Int128 | Direct)
-    // [new TypeIndex(121)] = "unsigned __int128", // unsigned __int128 (UInt128 | Direct)
-    [new TypeIndex(122)] = "char", // char16_t (Character16 | Direct)
-    [new TypeIndex(123)] = "uint", // char32_t (Character32 | Direct)
+  public static string ToCsName(TypeIndex index) => index.SimpleKind switch {
+    SimpleTypeKind.None => "__arglist",
+    SimpleTypeKind.Void => "void",
+    SimpleTypeKind.NotTranslated => throw new NotSupportedException("NotTranslated type kind is not supported"),
+    SimpleTypeKind.HResult => nameof(CppHResult),
+    SimpleTypeKind.SignedCharacter => nameof(CppSignedChar),
+    SimpleTypeKind.UnsignedCharacter => nameof(CppUnsignedChar),
+    SimpleTypeKind.NarrowCharacter => nameof(CppChar),
+    SimpleTypeKind.WideCharacter => nameof(CppWideChar),
+    SimpleTypeKind.Character16 => nameof(CppChar16),
+    SimpleTypeKind.Character32 => nameof(CppChar32),
+    SimpleTypeKind.SByte => nameof(CppInt8),
+    SimpleTypeKind.Byte => nameof(CppUInt8),
+    SimpleTypeKind.Int16Short => nameof(CppInt16Short),
+    SimpleTypeKind.UInt16Short => nameof(CppUInt16Short),
+    SimpleTypeKind.Int16 => nameof(CppInt16),
+    SimpleTypeKind.UInt16 => nameof(CppUInt16),
+    SimpleTypeKind.Int32Long => nameof(CppInt32Long),
+    SimpleTypeKind.UInt32Long => nameof(CppUInt32Long),
+    SimpleTypeKind.Int32 => nameof(CppInt32),
+    SimpleTypeKind.UInt32 => nameof(CppUInt32),
+    SimpleTypeKind.Int64Quad => nameof(CppInt64Quad),
+    SimpleTypeKind.UInt64Quad => nameof(CppUInt64Quad),
+    SimpleTypeKind.Int64 => nameof(CppInt64),
+    SimpleTypeKind.UInt64 => nameof(CppUInt64),
+    SimpleTypeKind.Int128Oct => nameof(CppInt128Oct),
+    SimpleTypeKind.UInt128Oct => nameof(CppUInt128Oct),
+    SimpleTypeKind.UInt128 => nameof(CppUInt128),
+    SimpleTypeKind.Int128 => nameof(CppInt128),
+    SimpleTypeKind.Float16 => "global::System.Single",
+    SimpleTypeKind.Float32 => "float",
+    SimpleTypeKind.Float32PartialPrecision => nameof(CppFloat32PartialPrecision),
+    SimpleTypeKind.Float48 => throw new NotSupportedException("Float48 type kind is not supported"),
+    SimpleTypeKind.Float64 => "double",
+    SimpleTypeKind.Float80 => throw new NotSupportedException("Float80 type kind is not supported"),
+    SimpleTypeKind.Float128 => throw new NotSupportedException("Float128 type kind is not supported"),
+    SimpleTypeKind.Complex32 => throw new NotSupportedException("Complex32 type kind is not supported"),
+    SimpleTypeKind.Complex64 => throw new NotSupportedException("Complex64 type kind is not supported"),
+    SimpleTypeKind.Complex80 => throw new NotSupportedException("Complex80 type kind is not supported"),
+    SimpleTypeKind.Complex128 => "global::System.Numerics.Complex",
+    SimpleTypeKind.Boolean8 => "bool",
+    SimpleTypeKind.Boolean16 => nameof(CppBoolean16),
+    SimpleTypeKind.Boolean32 => nameof(CppBoolean32),
+    SimpleTypeKind.Boolean64 => nameof(CppBoolean64),
+    SimpleTypeKind.Complex16 => throw new NotSupportedException("Complex16 type kind is not supported"),
+    SimpleTypeKind.Complex32PartialPrecision => throw new NotSupportedException(
+      "Complex32PartialPrecision type kind is not supported"),
+    SimpleTypeKind.Complex48 => throw new NotSupportedException("Complex48 type kind is not supported"),
+    SimpleTypeKind.Boolean128 => nameof(CppBoolean128),
+    _ => throw new ArgumentOutOfRangeException(nameof(index))
+  };
 
-    [new TypeIndex(1539)] = "void*", // void* (Void | NearPointer64)
-    [new TypeIndex(1544)] = "uint*", // HRESULT* (HResult | NearPointer64)
-    [new TypeIndex(1552)] = "sbyte*", // signed char* (SignedCharacter | NearPointer64)
-    [new TypeIndex(1553)] = "short*", // short* (Int16Short | NearPointer64)
-    [new TypeIndex(1554)] = "int*", // long* (Int32Long | NearPointer64)
-    [new TypeIndex(1555)] = "long*", // __int64* (Int64Quad | NearPointer64)
-    [new TypeIndex(1568)] = "ushort*", // unsigned char* (UnsignedCharacter | NearPointer64)
-    [new TypeIndex(1569)] = "ushort*", // unsigned short* (UInt16Short | NearPointer64)
-    [new TypeIndex(1570)] = "uint*", // unsigned long* (UInt32Long | NearPointer64)
-    [new TypeIndex(1571)] = "ulong*", // unsigned __int64* (UInt64Quad | NearPointer64)
-    [new TypeIndex(1584)] = "bool*", // bool* (Boolean8 | NearPointer64)
-    [new TypeIndex(1585)] = "ushort*", // __bool16* (Boolean16 | NearPointer64)
-    [new TypeIndex(1586)] = "uint*", // __bool32* (Boolean32 | NearPointer64)
-    [new TypeIndex(1587)] = "ulong*", // __bool64* (Boolean64 | NearPointer64)
-    [new TypeIndex(1600)] = "float*", // float* (Float32 | NearPointer64)
-    [new TypeIndex(1601)] = "double*", // double* (Float64 | NearPointer64)
-    // [new TypeIndex(1602)] = "long double*", // long double* (Float80 | NearPointer64)
-    // [new TypeIndex(1603)] = "__float128*", // __float128* (Float128 | NearPointer64)
-    // [new TypeIndex(1604)] = "__float48*", // __float48* (Float48 | NearPointer64)
-    [new TypeIndex(1605)] = "float*", // float* (Float32PartialPrecision | NearPointer64)
-    [new TypeIndex(1606)] = "single*", // __half* (Float16 | NearPointer64)
-    // [new TypeIndex(1616)] = "_Complex float*", // _Complex float* (Complex32 | NearPointer64)
-    // [new TypeIndex(1617)] = "_Complex double*", // _Complex double* (Complex64 | NearPointer64)
-    // [new TypeIndex(1618)] = "_Complex long double*", // _Complex long double* (Complex80 | NearPointer64)
-    // [new TypeIndex(1619)] = "_Complex __float128*", // _Complex __float128* (Complex128 | NearPointer64)
-    [new TypeIndex(1640)] = "sbyte*", // __int8* (SByte | NearPointer64)
-    [new TypeIndex(1641)] = "byte*", // unsigned __int8* (Byte | NearPointer64)
-    [new TypeIndex(1648)] = "byte*", // char* (NarrowCharacter | NearPointer64)
-    [new TypeIndex(1649)] = "char*", // wchar_t* (WideCharacter | NearPointer64)
-    [new TypeIndex(1650)] = "short*", // __int16* (Int16 | NearPointer64)
-    [new TypeIndex(1651)] = "ushort*", // unsigned __int16* (UInt16 | NearPointer64)
-    [new TypeIndex(1652)] = "int*", // int* (Int32 | NearPointer64)
-    [new TypeIndex(1653)] = "uint*", // unsigned* (UInt32 | NearPointer64)
-    [new TypeIndex(1654)] = "long*", // __int64* (Int64 | NearPointer64)
-    [new TypeIndex(1655)] = "ulong*", // unsigned __int64* (UInt64 | NearPointer64)
-    // [new TypeIndex(1656)] = "__int128*", // __int128* (Int128 | NearPointer64)
-    // [new TypeIndex(1657)] = "unsigned __int128*", // unsigned __int128* (UInt128 | NearPointer64)
-    [new TypeIndex(1658)] = "char*", // char16_t* (Character16 | NearPointer64)
-    [new TypeIndex(1659)] = "uint*", // char32_t* (Character32 | NearPointer64)
+  // Have this here as a reference for now, idk if there's any inconsistencies
+  private static readonly Dictionary<SimpleTypeKind, string> SimpleTypeNames = new() {
+    [SimpleTypeKind.Void] = "void",
+    [SimpleTypeKind.NotTranslated] = "<not translated>",
+    [SimpleTypeKind.HResult] = nameof(CppHResult), // HRESULT
+    [SimpleTypeKind.SignedCharacter] = nameof(CppSignedChar), // signed char
+    [SimpleTypeKind.UnsignedCharacter] = nameof(CppUnsignedChar), // unsigned char
+    [SimpleTypeKind.NarrowCharacter] = nameof(CppChar), // char
+    [SimpleTypeKind.WideCharacter] = nameof(CppWideChar), // wchar_t
+    [SimpleTypeKind.Character16] = nameof(CppChar16), // char16_t
+    [SimpleTypeKind.Character32] = nameof(CppChar32), // char32_t
+    [SimpleTypeKind.SByte] = nameof(CppInt8), // __int8
+    [SimpleTypeKind.Byte] = nameof(CppUInt8), // unsigned __int8
+    [SimpleTypeKind.Int16Short] = nameof(CppInt16Short), // short
+    [SimpleTypeKind.UInt16Short] = nameof(CppUInt16Short), // unsigned short
+    [SimpleTypeKind.Int16] = nameof(CppInt16), // __int16
+    [SimpleTypeKind.UInt16] = nameof(CppUInt16), // unsigned __int16
+    [SimpleTypeKind.Int32Long] = nameof(CppInt32Long), // long
+    [SimpleTypeKind.UInt32Long] = nameof(CppUInt32Long), // unsigned long
+    [SimpleTypeKind.Int32] = nameof(CppInt32), // int
+    [SimpleTypeKind.UInt32] = nameof(CppUInt32), // unsigned
+    [SimpleTypeKind.Int64Quad] = nameof(CppInt64Quad), // __int64
+    [SimpleTypeKind.UInt64Quad] = nameof(CppUInt64Quad), // unsigned __int64
+    [SimpleTypeKind.Int64] = nameof(CppInt64), // __int64
+    [SimpleTypeKind.UInt64] = nameof(CppUInt64), // unsigned __int64
+    [SimpleTypeKind.Int128Oct] = nameof(CppUInt128), // unsigned __int128
+    [SimpleTypeKind.UInt128Oct] = nameof(CppUInt128Oct), // unsigned __int128
+    [SimpleTypeKind.Int128] = nameof(CppInt128Oct), // __int128
+    [SimpleTypeKind.UInt128] = nameof(CppUInt128Oct), // unsigned __int128
+    [SimpleTypeKind.Float16] = "global::System.Single", // __half
+    [SimpleTypeKind.Float32] = "float", // float
+    [SimpleTypeKind.Float32PartialPrecision] = nameof(CppFloat32PartialPrecision), // float
+    [SimpleTypeKind.Float48] = "float48", // __float48
+    [SimpleTypeKind.Float64] = "double", // double
+    [SimpleTypeKind.Float80] = "float80", // long double
+    [SimpleTypeKind.Float128] = "float128", // __float128
+    [SimpleTypeKind.Complex32] = "complex32", // _Complex float
+    [SimpleTypeKind.Complex64] = "complex64", // _Complex double
+    [SimpleTypeKind.Complex80] = "complex80", // _Complex long double
+    [SimpleTypeKind.Complex128] = "global::System.Numerics.Complex", // _Complex __float128
+    [SimpleTypeKind.Boolean8] = "bool", // bool
+    [SimpleTypeKind.Boolean16] = nameof(CppBoolean16), // __bool16
+    [SimpleTypeKind.Boolean32] = nameof(CppBoolean32), // __bool32
+    [SimpleTypeKind.Boolean64] = nameof(CppBoolean64), // __bool64
   };
 }

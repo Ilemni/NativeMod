@@ -8,6 +8,7 @@ using SharpPdb.Windows.SymbolRecords;
 using SharpPdb.Windows.TPI;
 using SharpPdb.Windows.TypeRecords;
 using SharpUtilities;
+using Flags = PdbToCSharp.CsNameUndecorator.Flags;
 
 namespace PdbToCSharp.Dissect;
 
@@ -18,22 +19,85 @@ internal static class PdbDissect {
     string output = $"output/{pdbName}_";
 
     using PdbFileReader pdbReader = new(pdbPath);
-    WriteStatics(output + "statics.txt", pdbReader);
+    {
+      using (StreamWriter debugWriter = new(output + "functions.txt")) {
+        HashSet<string> funcNames = [];
+        const Flags flags = Flags.NoAllocationLanguage | Flags.NoAccessSpecifiers | Flags.NoLeadingUnderscores | Flags.NoMicrosoftKeywords | Flags.NoComplexType;
+        foreach (PdbPublicSymbol? sym in pdbReader.PublicSymbols.OrderBy(s => s.RelativeVirtualAddress)) {
+          string csName = CsNameUndecorator.UnDecorateSymbolName(sym.Name, flags);
+          if (!csName.Contains('(')) {
+            // Not a function
+            continue;
+          }
+          int argStartIndex = csName.IndexOf('(');
+          if (!csName.AsSpan(0, argStartIndex).Contains('.')) {
+            // Not a member function
+            continue;
+          }
+
+          if (csName.Contains("<lambda")) {
+            // Don't care about lambdas
+            continue;
+          }
+          if (csName.Contains("`RTTI")) {
+            // Don't care about this
+            continue;
+          }
+
+          debugWriter.Write("  RVA: 0x");
+          debugWriter.Write($"{sym.RelativeVirtualAddress:X}");
+          debugWriter.Write("   | C#: ");
+          debugWriter.Write(csName);
+
+          if (!funcNames.Add(csName)) {
+            // Already seen this function name
+            debugWriter.Write(" // Duplicate function name");
+          }
+          debugWriter.WriteLine();
+        }
+      }
+
+      return;
+    }
+    PdbFile pdb = pdbReader.PdbFile;
+    ProcedureHelper.Load(pdbReader);
+    var tpiRecords = pdb.TpiStream.GetTypeRecords();
+    var ipiRecords = pdb.IpiStream.GetTypeRecords();
+    Directory.CreateDirectory("output");
 
     // Everything below this point is for debugging and analysis of the PDB file
 
-    PdbFile pdb = pdbReader.PdbFile;
-    ProcedureHelper.ReplaceNullSymbols(pdb);
-    var tpiRecords = pdb.TpiStream.GetTypeRecords();
-    var ipiRecords = pdb.IpiStream.GetTypeRecords();
+    using (StreamWriter funcWriter = new(output + "functions2.txt")) {
+      // var syms = pdbReader.PublicSymbols
+      //   .Select(s => (s.RelativeVirtualAddress, s.GetUndecoratedName()))
+      //   .OrderBy(s => s.RelativeVirtualAddress)
+      //   .ToArray();
 
-    ProcedureHelper.Load(pdb);
-    Directory.CreateDirectory("output");
-    using (StreamWriter debugWriter = new(output + "functions.txt")) {
-      foreach (PdbPublicSymbol f in pdbReader.PublicSymbols) {
-        debugWriter.WriteLine($"{f.RelativeVirtualAddress,10} | {f.Flags} {f.GetUndecoratedName()}");
+      var funcs2 = pdbReader.Functions
+        .Where(f => pdb.TryGetRecord(f.FunctionType.TypeIndex) is MemberFunctionRecord)
+        .Select(f => (f.RelativeVirtualAddress,
+          $"\"{f.Name}\" ({f.FunctionType.Name}) ({AsStr(pdb, f.FunctionType.TypeIndex)})"))
+        .OrderBy(f => f.RelativeVirtualAddress)
+        .ToArray();
+
+      string AsStr(PdbFile p, TypeIndex t) {
+        if (t.IsSimple) {
+          return t.SimpleKind is SimpleTypeKind.None ? "none" : SourceGen.ToCsName(t);
+        }
+
+        TypeRecord? type = p.TryGetRecord(t);
+        return type is null ? $"<null type for {t}>" : type.ToString(pdb);
+      }
+
+      foreach ((ulong RelativeVirtualAddress, string Name) f in /*syms.Union(*/
+               funcs2 /*)*/.OrderBy(f => f.RelativeVirtualAddress)) {
+        funcWriter.WriteLine($"{f.RelativeVirtualAddress:X8} | {f.Name}");
       }
     }
+
+    WriteStatics(output + "statics.txt", pdbReader);
+
+
 
     string replacementText = Environment.NewLine + "\n    ";
     using (StreamWriter debugWriter = new(output + "tpi.txt")) {
@@ -466,6 +530,23 @@ internal static class PdbDissect {
           break;
       }
     }
+
+    using StreamWriter procWriter = new(outputName.Replace(".txt", "_procedures.txt"));
+    var procRefs = globalSymbols.OfType<ProcedureReferenceSymbol>()
+      .OrderBy(p => p.Offset)
+      .ThenBy(p => p.Module)
+      .ToArray();
+
+    foreach (ProcedureReferenceSymbol procRef in procRefs) {
+      if (procRef.Name.String.StartsWith("Shii_boss")) {
+        ;
+      }
+
+      procWriter.WriteLine(
+        $"{procRef.Offset:X8}:{procRef.Module:X6} | " +
+        $"Procedure Name=\"{procRef.Name.String}\" | " +
+        $"RVA=0x{pdb.FindRelativeVirtualAddress(procRef.Module, procRef.Offset):X8}");
+    }
   }
 
   private static void WriteStatics(string outputName, PdbFileReader pdbReader) {
@@ -475,7 +556,7 @@ internal static class PdbDissect {
                .Select(gv => (gv, gv.RelativeVirtualAddress))
                .OrderBy(pair => pair.RelativeVirtualAddress)) {
       string dataName = data.Name;
-      string typeName = data.Type.TypeIndex.IsSimple ? SourceGen.BuiltinTypeNames[data.Type.TypeIndex] : data.Type.Name;
+      string typeName = data.Type.TypeIndex.IsSimple ? SourceGen.ToCsName(data.Type.TypeIndex) : data.Type.Name;
 
       if (rva == 0 ||
           typeName.StartsWith('*') ||
@@ -497,7 +578,7 @@ internal static class PdbDissect {
           w.Write("// ");
         }
 
-        typeName = eType.TypeIndex.IsSimple ? SourceGen.BuiltinTypeNames[eType.TypeIndex] : eType.Name;
+        typeName = eType.TypeIndex.IsSimple ? SourceGen.ToCsName(eType.TypeIndex) : eType.Name;
 
         w.Write("public static unsafe Span<");
         w.Write(typeName);

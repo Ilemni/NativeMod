@@ -1,4 +1,5 @@
 ﻿using System.Diagnostics.CodeAnalysis;
+using PdbToCSharp.Types;
 using SharpPdb.Native;
 using SharpPdb.Native.Types;
 using SharpPdb.Windows;
@@ -7,22 +8,23 @@ using PdbUdt = SharpPdb.Native.Types.PdbUserDefinedType;
 namespace PdbToCSharp;
 
 public sealed partial class SourceGen {
+  // TODO: Make sure CsTypes make use of the functionality of the remaining methods here before removing them
+  //  This partial is to be removed once it is no longed needed as a reference.
   /// Used to replace unnamed enums with "unnamed_enum_n"
-  private int _unnamedEnums;
+  internal int UnnamedStructs;
+  internal int UnnamedUnions;
+  internal int UnnamedEnums;
 
   private readonly Dictionary<string, PdbType> _uniqueCsNames = [];
   private readonly Dictionary<string, List<PdbType?>> _duplicateCsNames = [];
   private readonly Dictionary<PdbType, string> _typeNames = [];
 
-  private readonly Dictionary<TypeIndex, string> _selfNames = [];
   private readonly Dictionary<TypeIndex, string> _fullNames = [];
-  private readonly Dictionary<string, string> _selfNamesByUnique = [];
   private readonly Dictionary<string, string> _fullNamesByUnique = [];
-  private readonly Dictionary<string, List<PdbUdt>> _duplicateTopLevelNames = [];
 
   private string GetOrCreateTypeName<T>(T type, string? createName = null) where T : PdbType {
     if (type.TypeIndex.IsSimple) {
-      return BuiltinTypeNames[type.TypeIndex];
+      return ToCsName(type.TypeIndex);
     }
 
     if (TryResolveType(type, out PdbType? resolved)) {
@@ -41,10 +43,10 @@ public sealed partial class SourceGen {
     switch (type) {
       // Types which are typically just fields
       case PdbPointerType pointerType: {
-        int depth = GetPointerDepthAndElement(pointerType, out PdbType elementType);
-        string name = GetOrCreateTypeName(elementType) + new string('*', depth);
-        _typeNames[type] = name;
-        return name;
+        // int depth = GetPointerDepthAndElement(pointerType, out PdbType elementType);
+        // string name = GetOrCreateTypeName(elementType) + new string('*', depth);
+        // _typeNames[type] = name;
+        return null;
       }
       case PdbFunctionType functionType: {
         string returnTypeName = GetOrCreateTypeName(functionType.ReturnType);
@@ -116,7 +118,7 @@ public sealed partial class SourceGen {
 
   private string? CreateEnumTypeName(PdbEnumType enumType) {
     if (enumType.Name == "<unnamed-tag>") {
-      return "unnamed_enum_" + ++_unnamedEnums;
+      return "unnamed_enum_" + ++UnnamedEnums;
     }
 
     if (enumType.Name.StartsWith("<unnamed-type-")) {
@@ -146,16 +148,13 @@ public sealed partial class SourceGen {
     if (enumType.Name != "<unnamed-tag>") {
       // A different enum of the same name may be numbered differently in its UniqueName, so we extract that number
       int index = span.IndexOf("@?", StringComparison.Ordinal);
-      if (index > 0) {
-        char c = span[index + 2];
-        if (char.IsDigit(c) && char.GetNumericValue(c) > 1) {
-          createName = enumType.Name.SanitizeName() + '_' + c;
-        }
+      if (index <= 0) {
+        return createName;
       }
 
-      // Highlighting is weird here, IDE thinks this is unreachable, but it is clearly reachable
-      if (createName is null) {
-        ;
+      char c = span[index + 2];
+      if (char.IsDigit(c) && char.GetNumericValue(c) > 1) {
+        createName = enumType.Name.SanitizeName() + '_' + c;
       }
 
       return createName;
@@ -176,47 +175,12 @@ public sealed partial class SourceGen {
     return createName;
   }
 
-  private void AddSelfName(PdbUdt udt, string selfName) {
-    _selfNames[udt.TypeIndex] = selfName;
-    if (udt.UniqueName is not null) {
-      _selfNamesByUnique[udt.UniqueName] = selfName;
-    }
-  }
-
-  private string GetSelfName(PdbUdt udt) {
-    if (_selfNames.TryGetValue(udt.TypeIndex, out string? selfName)) {
-      return selfName;
-    }
-
-    if (udt.UniqueName is not null && _selfNamesByUnique.TryGetValue(udt.UniqueName, out selfName)) {
-      _selfNames[udt.TypeIndex] = selfName;
-      return selfName;
-    }
-
-    throw new KeyNotFoundException($"Self name not found for {udt.Name} ({udt.UniqueName})");
-  }
-
-  private void TryAddSelfName(PdbUdt udt, string selfName) {
-    _selfNames.TryAdd(udt.TypeIndex, selfName);
-
-    if (udt.UniqueName is not null) {
-      _selfNamesByUnique.TryAdd(udt.UniqueName, selfName);
-    }
-  }
-
-  private void AddQualifiedName(PdbType type, string fullName) {
-    _fullNames[type.TypeIndex] = fullName;
-    if (type is PdbUdt { UniqueName: { } uniqueName }) {
-      _fullNamesByUnique[uniqueName] = fullName;
-    }
-  }
-
   private string GetQualifiedName(PdbType type) {
     return type switch {
-      PdbSimpleType => BuiltinTypeNames[type.TypeIndex],
+      PdbSimpleType => ToCsName(type.TypeIndex),
       // Hack: should store this instead of creating it just-in-time
-      PdbPointerType pointer => GetPointerDepthAndElement(pointer, out PdbType element) switch {
-        var depth => GetQualifiedName(element) + "Ptr" + depth
+      PdbPointerType pointer => GetPointerDepthAndElement(/*pointer*/ null, out CsType element) switch {
+        var depth => GetQualifiedName(/*element*/ null) + "Ptr" + depth
       },
       PdbFunctionType function => function.ReturnType switch {
         PdbSimpleType { Name: "void" } => $"action_{string.Join('_', function.Arguments.Select(GetQualifiedName))}",
@@ -226,9 +190,8 @@ public sealed partial class SourceGen {
       PdbMemberFunctionType mFunction => "void*",
       PdbUdt udt => GetQualifiedName(udt),
       // TODO: another type that has missing names
-      PdbArrayType arr => _inlineArrayNames.TryGetValue(arr.Name, out string? name)
-        ? name
-        : "INLINE_ARRAY_MISSING_TYPE", //throw new KeyNotFoundException($"Inline array type not found for {arr.Name} ({arr.TypeIndex})"),
+      PdbArrayType arr => _inlineArrayNames.GetValueOrDefault(arr.Name, "INLINE_ARRAY_MISSING_TYPE"),
+      //throw new KeyNotFoundException($"Inline array type not found for {arr.Name} ({arr.TypeIndex})"),
       _ => throw new KeyNotFoundException($"Unhandled type {type.GetType().Name} for qualified name retrieval")
     };
   }
@@ -245,22 +208,6 @@ public sealed partial class SourceGen {
 
     // Hack, prefer to create the name ahead of time
     return udt.Name.SanitizeName(true);
-
-    throw new KeyNotFoundException($"Qualified name not found for {udt.Name} ({udt.UniqueName})");
-  }
-
-  private bool TryGetQualifiedName(TypeIndex typeIndex, [NotNullWhen(true)] out string? fullName) {
-    if (typeIndex.IsSimple) {
-      fullName = BuiltinTypeNames[typeIndex];
-      return true;
-    }
-
-    if (_pdb.GetType(typeIndex) is PdbUdt udt) {
-      return TryGetQualifiedName(udt, out fullName);
-    }
-
-    fullName = null;
-    return false;
   }
 
   private bool TryGetQualifiedName(PdbUdt udt, [NotNullWhen(true)] out string? fullName) {
@@ -271,28 +218,6 @@ public sealed partial class SourceGen {
     if (udt.UniqueName is { } unique &&
         _fullNamesByUnique.TryGetValue(unique, out fullName)) {
       _fullNames[udt.TypeIndex] = fullName;
-      return true;
-    }
-
-    return false;
-  }
-
-  private void TryAddQualifiedName(PdbUdt udt, string fullName) {
-    _fullNames.TryAdd(udt.TypeIndex, fullName);
-
-    if (udt.UniqueName is not null) {
-      _fullNamesByUnique.TryAdd(udt.UniqueName, fullName);
-    }
-  }
-
-  private bool HasQualifiedName(PdbUdt udt) {
-    if (_fullNames.ContainsKey(udt.TypeIndex)) {
-      return true;
-    }
-
-    if (udt.UniqueName is { } unique &&
-        _fullNamesByUnique.TryGetValue(unique, out string? names)) {
-      _fullNames[udt.TypeIndex] = names;
       return true;
     }
 

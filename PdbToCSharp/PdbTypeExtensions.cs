@@ -1,18 +1,11 @@
-﻿using SharpPdb.Native.Types;
+﻿using SharpPdb.Native;
 using SharpPdb.Windows.TypeRecords;
 
 namespace PdbToCSharp;
 
 public static class PdbTypeExtensions {
-  extension(PdbUserDefinedType udt) {
-    public FieldListRecord FieldListRecord => udt.TagRecord.FieldList.As<FieldListRecord>(udt.Pdb.PdbFile);
-    public IReadOnlyList<TypeRecord> FieldRecords => udt.FieldListRecord.Fields;
-
-    public IEnumerable<(NestedTypeRecord, PdbUserDefinedType)> NestedTypes =>
-      udt.FieldRecords
-        .OfType<NestedTypeRecord>()
-        .Select(n => (n, udt.Pdb.GetType(n.Type) is PdbUserDefinedType { IsNested: true } u ? u : null))
-        .Where(t => t.Item2 is not null)
-        .Cast<(NestedTypeRecord, PdbUserDefinedType)>();
+  extension(TagRecord tag) {
+    public FieldListRecord GetFieldList(PdbFileReader pdb) => tag.FieldList.As<FieldListRecord>(pdb.PdbFile);
+    public IReadOnlyList<TypeRecord> GetFields(PdbFileReader pdb) => tag.GetFieldList(pdb).Fields;
   }
 }

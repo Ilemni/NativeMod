@@ -1,9 +1,12 @@
 ﻿using System.Diagnostics;
+using SharpPdb.Native;
 using SharpPdb.Windows;
 using SharpPdb.Windows.SymbolRecords;
 using SharpPdb.Windows.TypeRecords;
 
 namespace PdbToCSharp;
+
+// TODO: make this an instance class that is a member of SourceGen
 
 /// <summary>
 /// Struct that holds procedure info, including parameter names
@@ -15,47 +18,79 @@ public readonly record struct ProcedureInfo(
   ProcedureSymbol Procedure,
   (TypeIndex Type, string Name)[] Args,
   bool GoodSize
-);
+) {
+  public required ulong Rva { get; init; }
+
+  public override string ToString() {
+    return $"{Procedure.Name.String}({string.Join(", ", Args.Select(a => $"{a.Type} {a.Name}"))}) (RVA: 0x{Rva:X})";
+  }
+}
 
 /// <summary>
 /// Class that loads and stores procedure info. Includes parameter names
 /// </summary>
 public static class ProcedureHelper {
-  public static Dictionary<TypeIndex, ProcedureInfo> Names { get; } = new();
+  public static readonly Dictionary<(TypeIndex FunctionType, string Name), ProcedureInfo> Names = [];
+  public static readonly Dictionary<(TypeIndex FunctionType, string Name), ProcedureInfo> MemberNames = [];
+  public static readonly Dictionary<TypeIndex, ProcedureInfo> Functions = [];
+  public static IEnumerable<ProcedureInfo> Procedures => Names.Values.OrderBy(p => p.Procedure.Name.String);
+  public static IEnumerable<ProcedureInfo> MProcedures => MemberNames.Values.OrderBy(p => p.Procedure.Name.String);
 
-  public static void Load(PdbFile pdb) {
-    if (Names.Count > 0) {
+  public static void Load(PdbFileReader pdbReader) {
+    PdbFile pdb = pdbReader.PdbFile;
+    if (Names.Count > 0 || MemberNames.Count > 0) {
       return;
     }
 
     Names.Clear();
+    MemberNames.Clear();
+    Functions.Clear();
     ReplaceNullSymbols(pdb);
+
     List<(TypeIndex, string)> paramNamesList = [];
+    Dictionary<string, List<string>> collisions = [];
+    Dictionary<ulong, string> syms = [];
+
+    foreach (PdbPublicSymbol sym in pdbReader.PublicSymbols) {
+      // TODO: use CsNameUndecorator.UnDecorateSymbolName
+      syms[sym.RelativeVirtualAddress] = sym.GetUndecoratedName();
+    }
+
     foreach (ProcedureSymbol proc in pdb.DbiStream.Modules
                .Where(m => m.LocalSymbolStream is not null)
                .SelectMany(m => m.LocalSymbolStream.AsEnumerable()
                  .OfType<ProcedureSymbol>())
             ) {
-      TypeRecord? untypedRecord = pdb.TryGetRecord(proc.FunctionType);
-
-      if (untypedRecord is not ProcedureRecord and not MemberFunctionRecord) {
+      if (proc.FunctionType.Index == 0) {
         continue;
       }
 
-      if (Names.TryGetValue(proc.FunctionType, out ProcedureInfo test) && test.GoodSize) {
+      string? sym = syms.GetValueOrDefault(pdb.FindRelativeVirtualAddress(proc.Segment, proc.Offset));
+
+      TypeRecord untypedRecord = pdb.GetRecord(proc.FunctionType, pdb.TpiStream);
+      var names = untypedRecord switch {
+        ProcedureRecord => Names,
+        MemberFunctionRecord => MemberNames,
+        _ => throw new UnreachableException("Unexpected type record for procedure")
+      };
+
+      if (names.TryGetValue((proc.FunctionType, proc.Name.String), out ProcedureInfo test) && test.GoodSize) {
+        if (!collisions.TryGetValue(proc.Name.String, out var list)) {
+          list = [];
+          collisions[proc.Name.String] = list;
+          list.Add(sym);
+        }
+
+        list.Add(sym);
         continue;
       }
 
-      int paramCount = untypedRecord switch {
-        ProcedureRecord procRecord => procRecord.ParameterCount,
-        MemberFunctionRecord funcRecord => funcRecord.ParameterCount,
-        _ => throw new UnreachableException()
+      (int paramCount, TypeIndex argList) = untypedRecord switch {
+        ProcedureRecord procRecord => (procRecord.ParameterCount, procRecord.ArgumentList),
+        MemberFunctionRecord funcRecord => (funcRecord.ParameterCount, funcRecord.ArgumentList),
+        _ => throw new UnreachableException("Unexpected type record for procedure")
       };
-      TypeIndex argList = untypedRecord switch {
-        ProcedureRecord procRecord => procRecord.ArgumentList,
-        MemberFunctionRecord funcRecord => funcRecord.ArgumentList,
-        _ => throw new UnreachableException()
-      };
+
       int paramsLeft = paramCount;
 
       bool hasThisArg = false;
@@ -71,11 +106,11 @@ public static class ProcedureHelper {
       }
 
       var paramNames = paramNamesList.ToArray();
-      Names[proc.FunctionType] = new ProcedureInfo(
-        proc,
-        paramNames,
-        paramsLeft == 0
-      );
+      ProcedureInfo pInfo = new(proc, paramNames, paramsLeft == 0) {
+        Rva = pdb.FindRelativeVirtualAddress(proc.Segment, proc.Offset)
+      };
+      names[(proc.FunctionType, proc.Name.String)] = pInfo;
+      Functions[proc.FunctionType] = pInfo;
       paramNamesList.Clear();
 
       string procName = proc.Name.String;
@@ -100,27 +135,34 @@ public static class ProcedureHelper {
       else if (paramsLeft < 0) {
         // Only warn if not a typical destructor
         if (!procName.Contains('~') || paramCount != 0 || paramNames.Length != 1) {
-          Console.ForegroundColor = ConsoleColor.Yellow;
-          Console.WriteLine(
+          Log.Warn(
             $"Warning: {untypedRecord.Kind} Procedure {procName} with {paramCount} args has extra named args, total {paramNames.Length}");
-          Console.ResetColor();
         }
       }
+    }
+
+    if (collisions.Count > 0) {
+      var collisionsWeCareAbout = collisions
+        .Where(kv => !kv.Key.Contains('~') && !kv.Key.Contains("destructor for"));
+
+      Log.Warn($"{collisions.Sum(kv => kv.Value.Count)} procedures had duplicate names and were skipped.");
     }
   }
 
   /// Ensure all members not null
   /// SymbolRecord.Children property WILL throw if any children are null
-  internal static void ReplaceNullSymbols(PdbFile pdb) {
-    foreach (SymbolStream mSymbols in pdb.DbiStream.Modules
-               .Select(m => m.LocalSymbolStream)
-               .Where(s => s is not null)) {
+  private static void ReplaceNullSymbols(PdbFile pdb) {
+    var enumerable = pdb.DbiStream.Modules
+      .Select(m => m.LocalSymbolStream)
+      .Where(s => s is not null)
+      .OrderBy(s => s!.References.Count);
+    Parallel.ForEach(enumerable, mSymbols => {
       var cache = mSymbols.GetSymbolsCache();
       for (int i = 0; i < mSymbols.References.Count; i++) {
         if (mSymbols[i] is null) {
           cache[i] = new NullSymbol(mSymbols, i);
         }
       }
-    }
+    });
   }
 }

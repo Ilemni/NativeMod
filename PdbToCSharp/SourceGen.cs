@@ -1,72 +1,117 @@
 ﻿using System.Diagnostics;
 using System.Diagnostics.CodeAnalysis;
+using System.Runtime.InteropServices;
 using Microsoft.CodeAnalysis.CSharp;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
+using PdbToCSharp.Dissect;
+using PdbToCSharp.ThirdParty;
+using PdbToCSharp.Types;
 using SharpPdb.Native;
 using SharpPdb.Native.Types;
 using SharpPdb.Windows;
 using SharpPdb.Windows.TypeRecords;
-using PdbUdt = SharpPdb.Native.Types.PdbUserDefinedType;
 using FsNamespaceDecl = Microsoft.CodeAnalysis.CSharp.Syntax.FileScopedNamespaceDeclarationSyntax;
 using MethodDecl = Microsoft.CodeAnalysis.CSharp.Syntax.BaseMethodDeclarationSyntax;
 using static Microsoft.CodeAnalysis.CSharp.SyntaxFactory;
 
 namespace PdbToCSharp;
 
-public sealed partial class SourceGen(string path, string namespaceName) : IDisposable {
-  private readonly PdbFileReader _pdb = new(path);
-  private PdbFile PdbFile => _pdb.PdbFile;
-  private readonly Namespaces _ns = new(namespaceName);
+public sealed partial class SourceGen : IDisposable {
+  // TODO: Actually use the root namespace.
+  /// Root namespace for all generated code.
+  public readonly string Namespace;
 
-  /// Filtered array of User Defined Types, excluding forward references, scoped types, and compiler generated types.
-  private PdbUdt[] _udts = null!;
+  public SourceGen(string path, string namespaceName) {
+    Namespace = namespaceName;
+    Pdb = new PdbFileReader(path);
+    _ns = new Namespaces(namespaceName);
+    CsTypes = new CsType[Pdb.PdbFile.TpiStream.TypeRecordCount];
+  }
 
-  private readonly Dictionary<string, PdbUdt> _addedClasses = [];
-  private readonly Dictionary<string, PdbEnumType> _addedEnums = [];
+  internal readonly Dictionary<TypeIndex, CsType> CsSimpleTypes = [];
+  internal readonly CsType?[] CsTypes;
+  internal readonly Dictionary<TypeIndex, CsUdt> CsUdts = [];
+
+  // Debug inspect to see which CsTypes are not mapped to records
+  private IEnumerable<(CsType? Cs, TypeRecord Pdb)> CsPdbTypePairs =>
+    CsTypes.Select((cs, i) => (cs, Pdb.PdbFile.GetRecord(TypeIndex.FromArrayIndex(i))));
+
+  // Debug inspect to see which CsTypes do get mapped to records
+  private IEnumerable<(CsType Cs, TypeRecord Pdb)> CsNotNullPairs =>
+    CsPdbTypePairs.Where(p => p.Cs is not null).Cast<(CsType Cs, TypeRecord Pdb)>();
+
+
+  internal readonly PdbFileReader Pdb;
+  private PdbFile PdbFile => Pdb.PdbFile;
+  private readonly Namespaces _ns;
+
+  internal TypeRecord[] Records = null!;
+  private (TagRecord tag, TypeIndex index)[] _tagRecords = null!;
+
+  private readonly Dictionary<string, Dictionary<string, CsUdt>> _addedClassesByNamespace = [];
+  private readonly Dictionary<string, Dictionary<string, CsEnum>> _addedEnumsByNamespace = [];
 
   /// Types which only have a forward reference.
   private readonly HashSet<string> _missingTypes = [];
 
   /// Types which are nested but lack a parent type.
-  private readonly HashSet<PdbUdt> _orphanedNestedTypes = [];
+  private readonly HashSet<CsUdt> _orphanedNestedTypes = [];
 
   public void PdbToCSharp(string outputPath) {
-    Log.Step("Processing PDB...");
+    Log.Step("Processing PDB");
     Process();
 
-    Log.Step("Writing generated C# code...");
+    Log.Step("Writing generated C# code");
     _ns.WriteAllToFiles(outputPath);
     Log.Step("Done.");
   }
 
   private void Process() {
     PreProcess();
-    Log.Step("Creating inline array types...");
+    Log.Step("Creating inline array types");
     ProcessInlineArrays();
     // DebugPdb();
 
-    Log.Step("Creating all other types...");
-    foreach (PdbUdt udt in _udts.Where(u => !u.IsNested)) {
-      string name = GetQualifiedName(udt);
-      if (udt is PdbEnumType enumType) {
-        if (_addedEnums.TryGetValue(name, out PdbEnumType? existingEnum)) {
-          if (existingEnum.UniqueName == enumType.UniqueName && !string.IsNullOrEmpty(enumType.UniqueName)) {
-            continue;
-          }
-
-          Log.Warn(
-            $"Duplicate enum name {name} for {enumType.Name} and {existingEnum.Name}. Skipping {enumType.Name}");
-        }
-
-        ref FsNamespaceDecl enumNs = ref _ns.EnumNs;
-        enumNs = enumNs.AddMember(CreateEnum(enumType));
-        _addedEnums[name] = enumType;
+    Log.Step("Creating all other types... ");
+    int total = CsUdts.Values.Count(u => u.Parent is null);
+    int i = 0;
+    HashSet<TypeIndex> created = [];
+    using ProgressBar progressBar = new();
+    foreach (CsUdt udt in CsUdts.Values.Where(u => u.Parent is null)) {
+      progressBar.Report((double)++i / total);
+      if (!created.Add(udt.TypeIndex)) {
+        // TODO: allow declaration of empty forward references
+        // Was a forward reference
         continue;
       }
 
-      if (!_addedClasses.TryAdd(name, udt)) {
-        // Log.Info($"Skipping duplicate class {genName} for {udt.Name}");
+      string name = udt.FullName;
+      if (udt is CsEnum csEnum) {
+        if (!_addedEnumsByNamespace.TryGetValue(name, out var nsEDict)) {
+          nsEDict = [];
+          _addedEnumsByNamespace[name] = nsEDict;
+        }
+        else {
+          if (!nsEDict.TryAdd(name, csEnum)) {
+            // Log.Warn($"Duplicate enum name \"{name}\" in namespace \"{csEnum.Namespace}\".");
+            continue;
+          }
+        }
+
+        ref FsNamespaceDecl enumNs = ref _ns.EnumNs;
+        enumNs = enumNs.AddMember(CreateEnum(csEnum));
         continue;
+      }
+
+      if (!_addedClassesByNamespace.TryGetValue(name, out var nsDict)) {
+        nsDict = [];
+        _addedClassesByNamespace[name] = nsDict;
+      }
+      else {
+        if (!nsDict.TryAdd(name, udt)) {
+          // Log.Warn($"Duplicate class name \"{name}\" in namespace \"{udt.Namespace}\".");
+          continue;
+        }
       }
 
       ref FsNamespaceDecl nsToAdd = ref _ns.GetMatching(udt);
@@ -79,32 +124,39 @@ public sealed partial class SourceGen(string path, string namespaceName) : IDisp
   [SuppressMessage("ReSharper", "UnusedVariable")]
   // Random linq methods to poke at things
   private void DebugPdb() {
+    // Debug inspect InlineArray types
+    var arrays = CsTypes.OfType<CsArray>().OrderBy(a => a.ToString()).ToArray();
+
+    // Debug inspect a complex CsTypes
+    CsUdt? shiiBoss = CsUdts.Values.FirstOrDefault(u => u.SelfName == "Shii_boss");
+
     // Debug enum scopes
-    List<PdbEnumType> scopedEnums = [];
-    List<PdbEnumType> unscopedEnums = [];
-    foreach (PdbEnumType pdbEnumType in _udts.OfType<PdbEnumType>().Where(e => !e.Name.Contains('<'))) {
-      (pdbEnumType.IsScoped ? scopedEnums : unscopedEnums).Add(pdbEnumType);
+    List<CsEnum> scopedEnums = [];
+    List<CsEnum> unscopedEnums = [];
+    foreach (CsEnum csEnum in CsUdts.Values.OfType<CsEnum>().Where(e => !e.Record.Name.String.Contains('<'))) {
+      (csEnum.Record.Options.HasFlag(ClassOptions.Scoped) ? scopedEnums : unscopedEnums).Add(csEnum);
     }
 
     // Debug pointer fields
-    var pointerFields = new Dictionary<PdbUdt, PdbUdt[]>();
-    foreach (PdbUdt udt in _udts.Where(u => !u.IsScoped)) {
-      var scopedFields = udt.Fields
-        .Select(f => f.Type)
+    var pointerFields = new Dictionary<CsStructure, CsUdt[]>();
+    foreach (CsStructure udt in CsUdts.Values.OfType<CsStructure>().Where(u => !u.Record.Options.HasFlag(ClassOptions.Scoped))) {
+      var scopedFields = udt.InstanceFields
+        .Select(f => f.FieldType)
         .Select(f =>
-          f as PdbUdt ??
-          (f as PdbPointerType)?.ElementType as PdbUdt)
-        .Where(u => u is { IsScoped: true }).ToArray();
+          f as CsUdt ??
+          (f as CsPointerType)?.ElementType as CsUdt)
+        .OfType<CsUdt>()
+        .Where(u => u.Record.Options.HasFlag(ClassOptions.Scoped)).ToArray();
       if (scopedFields.Length > 0) {
-        pointerFields[udt] = scopedFields!;
+        pointerFields[udt] = scopedFields;
       }
     }
 
     // Debug pointer depth
-    var pDict = new Dictionary<int, List<PdbTypeField>>();
-    foreach (var fields in _udts.Select(u => u.Fields)) {
-      foreach (PdbTypeField f in fields) {
-        if (f.Type is PdbPointerType pointer && GetPointerDepth(pointer) is > 0 and var pointerDepth) {
+    var pDict = new Dictionary<int, List<CsInstanceField>>();
+    foreach (var fields in CsUdts.Values.OfType<CsStructure>().Select(u => u.InstanceFields)) {
+      foreach (CsInstanceField f in fields) {
+        if (f.FieldType is CsPointerType pointer && GetPointerDepth(pointer) is > 0 and var pointerDepth) {
           if (!pDict.TryGetValue(pointerDepth, out var l)) {
             l = [];
             pDict[pointerDepth] = l;
@@ -115,255 +167,164 @@ public sealed partial class SourceGen(string path, string namespaceName) : IDisp
       }
     }
 
-    // Debug pdb namespaces
-    Dictionary<string, int> namespaces = [];
-    foreach (PdbUdt udt in _udts.Where(u => !u.IsNested)) {
-      string name = udt.Name;
-      if (!name.Contains('<') && name.Contains("::")) {
-        string toAdd = name[..name.LastIndexOf("::", StringComparison.Ordinal)];
-        namespaces.Increment(toAdd);
-      }
-    }
 
-    var list = namespaces.OrderByDescending(kvp => kvp.Value).ToArray();
-    var list2 = namespaces.OrderBy(kvp => kvp.Key).ToArray();
-
-
-    var fromRecords = _pdb.AsRecordEnumerable()
+    var nestedCsTypesFromRecords = Pdb.AsRecordEnumerable()
       .OfType<FieldListRecord>()
       .Select(f => f.Fields
         .OfType<NestedTypeRecord>()
-        .Select(n => (n, _pdb.TryGetType<PdbUdt>(n.Type) is { IsNested: true } u ? u : null))
+        .Select(n => (n, CsUdts.TryGetValue(n.Type, out CsUdt? udt) && udt.Record.IsNested ? udt : null))
         .Where(r => r.Item2 is not null)
-        .OfType<(NestedTypeRecord, PdbUdt)>()
+        .OfType<(NestedTypeRecord, CsUdt)>()
         .ToArray())
       .Where(r => r.Length > 0)
       .ToArray();
-
-    var unnamedNestedTypes = fromRecords
-      .SelectMany(r => r)
-      .Where(r => r.Item1.Name.String.Contains('<'))
-      .OrderBy(r => r.Item1.Name.String)
-      .ToArray();
-
-    var fromManaged = _pdb.UDTs
-      .Where(u => u.ContainsNestedClass)
-      .Select(u => (u, u.NestedTypes.ToArray()))
-      .Where(t => t.Item2.Length > 0)
-      .OrderBy(t => t.u.Name)
-      .ToArray();
-
-    var bosses = _udts.Where(u => u.BaseClasses.Any(b => b.BaseType.Name.Contains("Boss"))).ToArray();
-
-    var virtuals = _udts
-      .Where(u => !u.Name.StartsWith("std::") && u.VirtualBaseClasses.Any())
-      .Select(u => (u, u.FieldRecords))
-      .Where(u => u.FieldRecords.Any(f => f.Kind == TypeLeafKind.LF_VFUNCTAB))
-      .Select(u => (u.u, u.FieldRecords, u.FieldRecords
-        .OfType<VirtualFunctionPointerRecord>()
-        .Select(v =>
-          PdbFile.GetRecord(PdbFile.GetRecord<PointerRecord>(v.Type).ReferentType))
-        .ToArray()))
-      .ToArray();
-    var virtualBCs = _udts
-      .Where(u => !u.Name.StartsWith("std::") && u.VirtualBaseClasses.Any())
-      .Select(u => (u, u.FieldRecords))
-      .ToArray();
-
-    var scoped = _pdb.UDTs.Where(u =>
-      !u.TagRecord.IsForwardReference &&
-      u.IsScoped &&
-      u is not PdbEnumType &&
-      !u.Name.Contains("unnamed struct at") &&
-      !u.Name.Contains("`lambda at") &&
-      !u.Name.Contains("<lambda_")
-    ).ToArray();
   }
 
-  private void CreateTypeForNs(PdbUdt udt, ref FsNamespaceDecl ns) {
-    string name = GetSelfName(udt);
-    MemberDeclarationSyntax member = CreateType(udt, name);
+  private void CreateTypeForNs(CsUdt udt, ref FsNamespaceDecl ns) {
+    string name = udt.SelfName;
+    MemberDeclarationSyntax member = CreateType(udt);
     ns = ns.AddMember(member);
   }
 
 
   private void PreProcess() {
-    // Collect all types which we're interested in generating, and create their names.
-    _udts = _pdb.UDTs.Where(u =>
-      !u.TagRecord.IsForwardReference &&
-      !u.IsScoped &&
-      !u.Name.Contains("unnamed struct at") &&
-      !u.Name.Contains("`lambda at") &&
-      !u.Name.Contains("<lambda_")
-    ).ToArray();
+    // Lets us get argument names for the methods, which are not available in the TPI stream.
+    Log.Step("Loading procedure info");
+    ProcedureHelper.Load(Pdb);
+    Records = PdbFile.TpiStream.GetTypeRecords();
 
-    var nestedTypes = _pdb.UDTs
-      .Where(u => u.ContainsNestedClass)
-      .SelectMany(p => p.NestedTypes.Select(n => (n, p)));
-    var unnamedNestedTypes = nestedTypes
-      .Select(a => (p: a.p.Name, n: a.n.Item1.Name.String))
-      .Where(n => n.n.Contains('<'))
-      .OrderBy(n => n.n)
-      .ToArray();
-    // foreach ((NestedTypeRecord record, PdbUdt nestedUdt) in nestedTypes) {
-    //   string name = record.Name.String;
-    //   if (name.Contains('<') || name.Contains("unnamed struct at") || name.Contains("`lambda at")) {
-    //     continue;
-    //   }
-    // }
-
-    // Create names for all top-level types first, so that nested types can use the parent name as a prefix.
-    Log.Step("Creating initial names for all types...");
-    foreach (PdbUdt udt in _pdb.UDTs.Where(u =>
-               !u.TagRecord.IsForwardReference &&
-               !u.Name.Contains("unnamed struct at") &&
-               !u.Name.Contains("`lambda at") &&
-               !u.Name.Contains("lambda_")
-             )) {
-      GetOrCreateTypeName(udt);
-    }
-
-    Log.Step("Creating qualified names for all types...");
-    QualifyAllNames();
-
-    var enumNames = _fullNames.Select(kvp => (_pdb.TryGetType<PdbEnumType>(kvp.Key), kvp.Value))
-      .Where(t => t.Item1 is not null)
+    Log.Step("Collecting tag records");
+    _tagRecords = Records
+      .Index()
+      .Where(r => r.Item is TagRecord tag && AllowedName(tag.Name.String))
+      .Select(r => ((TagRecord)r.Item, TypeIndex.FromArrayIndex(r.Index)))
       .ToArray();
 
-    // Collect types which have forward-references but lack actual bodies
-    Log.Step("Looking for missing types (only forward-referenced)...");
-    var forwardRefs = _pdb.UDTs.Where(u => u.TagRecord.IsForwardReference).ToArray();
-    var nonForwardRefs = _pdb.UDTs.Where(u => !u.TagRecord.IsForwardReference).ToArray();
-    _missingTypes.UnionWith(
-      forwardRefs.Where(u =>
-          nonForwardRefs.All(uu => uu.UniqueName != u.UniqueName))
-        .Select(u => u.Name));
-  }
+    Log.Step("Creating non-forward reference types");
+    Parallel.ForEach(_tagRecords.Where(r => !r.tag.IsForwardReference),
+      iter => { CsType.GetOrCreate(this, iter.index); });
 
-  /// We try to qualify all names so that we can support creating nested structs.
-  /// A struct must refer to itself when defining itself by its own name (i.e. Tag)
-  /// while all other types must refer to it by its full name (i.e. Outer.Inner.Tag)
-  /// Fortunately a struct can refer to itself with the fully qualified name.
-  private void QualifyAllNames() {
-    foreach (PdbEnumType enumType in _pdb.UDTs.OfType<PdbEnumType>().Where(e => !e.IsNested)) {
-      _typeNames[enumType] = CreateEnumTypeName(enumType);
-    }
+    Log.Step("Resolving forward references");
+    Parallel.ForEach(_tagRecords.Index().Where(r => r.Item.tag.IsForwardReference), iter => {
+      (TagRecord tag, TypeIndex i) = iter.Item;
 
-    Dictionary<PdbUdt, (PdbUdt parent, string name)> typesToQualify = [];
-    foreach (PdbUdt parent in _pdb.UDTs.Where(u => u.ContainsNestedClass)) {
-      foreach ((NestedTypeRecord n, PdbUdt nested) in parent.NestedTypes) {
-        string name = n.Name.String.SanitizeName();
-        typesToQualify[nested] = (parent, name);
-        _typeNames[nested] = name;
+      ResolveForwardReference(tag, iter.Index, out TagRecord? resolved, out TypeIndex resolvedIndex);
+      CsType csType = resolved is null ? CsType.GetOrCreate(this, i) : CsTypes[resolvedIndex.ArrayIndex]!;
+      CsTypes[i.ArrayIndex] = csType;
+    });
+
+    foreach ((int i, CsUdt udt) in CsTypes.Index().Where(r => r.Item is CsUdt).Select(r => (r.Index, (CsUdt)r.Item!))) {
+      CsUdts[udt.TypeIndex] = udt;
+      if (i != udt.TypeIndex.ArrayIndex) {
+        CsUdts[TypeIndex.FromArrayIndex(i)] = udt;
       }
     }
 
-    // List is populated before creating names, to ensure we have full parent chains for all nested types.
-    foreach (var kvp in typesToQualify) {
-      string qualifiedName = QualifyName(kvp.Key);
-      AddQualifiedName(kvp.Key, qualifiedName);
-    }
+    Log.Step("Finding parents for all nested types");
+    var nestedIter = CsUdts.Values
+      .Where(p => p.Record.Options.HasFlag(ClassOptions.ContainsNestedClass))
+      .Select(p => (parent: p, p.Record.GetFields(Pdb).OfType<NestedTypeRecord>()));
 
-    // Find nested types which are missing a parent type
-    foreach (PdbUdt nested in _udts.Where(u => u.IsNested)) {
-      if (!HasQualifiedName(nested)) {
-        _orphanedNestedTypes.Add(nested);
+    Parallel.ForEach(nestedIter, iter => {
+      foreach (NestedTypeRecord nested in iter.Item2) {
+        if (CsUdts.TryGetValue(nested.Type, out CsUdt? nestedCs)) {
+          nestedCs.SetParent(iter.parent, nested);
+        }
       }
-    }
+    });
 
-    // Add top-level name which has no nesting.
-    foreach ((PdbType key, string value) in _typeNames) {
-      if (key is PdbUdt udt) {
-        TryAddSelfName(udt, value);
-        TryAddQualifiedName(udt, value);
+    // Force loading of lazy-loaded props
+    foreach (CsUdt csUdt in CsUdts.Values) {
+      _ = csUdt.FullName;
+      if (csUdt is CsStructure csStruct) {
+        _ = csStruct.BaseClasses;
+        _ = csStruct.InstanceMethods;
+        var fields = csStruct.InstanceFields;
+        foreach (CsInstanceField f in fields) {
+          _ = f.FieldType;
+        }
       }
-    }
-
-    if (_orphanedNestedTypes.Count > 0) {
-      Log.Warn($"Found {_orphanedNestedTypes.Count} orphaned nested types.\n    "
-        + string.Join("\n    ", _orphanedNestedTypes.Select(n => $"\"{n.Name}\"").Order(StringComparer.Ordinal)));
-    }
-
-    var a = _fullNames.Where(kvp => kvp.Value.Contains("Watcher"));
-    var b = _selfNames.Where(kvp => kvp.Value.Contains("Watcher"));
-
-    return;
-
-    string QualifyName(PdbUdt type) {
-      if (!type.IsNested) {
-        return _typeNames[type];
-      }
-
-      if (typesToQualify.TryGetValue(type, out (PdbUdt parent, string name) parentInfo)) {
-        PdbUdt parent = parentInfo.parent;
-        string parentName = QualifyName(parent);
-        return $"{parentName}.{parentInfo.name}";
-      }
-
-      if (_fullNames.TryGetValue(type.TypeIndex, out string? fullName)) {
-        return fullName;
-      }
-
-      if (_fullNames.FirstOrDefault(kvp => ((PdbUdt)_pdb.GetType(kvp.Key)).UniqueName == type.UniqueName).Value is
-          { } found) {
-        return found;
-      }
-
-      string name =
-        typesToQualify.TryGetValue(type, out (PdbUdt _, string name) res)
-          ? res.name
-          : typesToQualify.First(q => q.Key.UniqueName == type.UniqueName).Value.name;
-
-      return name;
     }
   }
 
-  private MemberDeclarationSyntax CreateType(PdbUdt udt, string? name = null) {
-    if (udt.TagRecord.IsForwardReference) {
-      throw new ArgumentException($"Cannot create type for forward reference: {udt.Name}");
+  private bool ResolveForwardReference(TagRecord tag, int start, [NotNullWhen(true)] out TagRecord? resolved,
+    out TypeIndex index) {
+    // Try resolving forward first
+    (resolved, index) = _tagRecords
+      .Skip(start)
+      .FirstOrDefault(r => !r.tag.IsForwardReference &&
+        r.tag.Name.String == tag.Name.String &&
+        r.tag.UniqueName.String == tag.UniqueName.String);
+
+    if (resolved is null) {
+      // Much less common, some types may resolve backwards
+      (resolved, index) = _tagRecords
+        .Take(start)
+        .LastOrDefault(r => !r.tag.IsForwardReference &&
+          r.tag.Name.String == tag.Name.String &&
+          r.tag.UniqueName.String == tag.UniqueName.String);
+    }
+
+    return resolved is not null;
+  }
+
+  private bool AllowedName(string name) {
+    return !name.Contains("unnamed struct at") &&
+      !name.Contains("`lambda at") && !name.Contains("<lambda_");
+  }
+
+  private MemberDeclarationSyntax CreateType(CsUdt udt) {
+    if (udt.Record.IsForwardReference) {
+      // TODO: Create an empty struct for these. A forward reference here means there is NOT a fully defined type for this.
+      // Log.Warn($"Skipping forward-reference-only type: {udt.FullName}");
+      // throw new ArgumentException($"Cannot create type for forward reference: {udt.FullName}");
     }
 
     return udt switch {
-      PdbClassType or PdbUnionType => CreateStruct(udt, name),
-      PdbEnumType enumType => CreateEnum(enumType, name),
-      _ => throw new InvalidDataException($"Unexpected tag record kind: {udt.GetType().Name}, name: {udt.Name}")
+      CsStructure structure => CreateStruct(structure),
+      CsEnum enumType => CreateEnum(enumType),
+      _ => throw new InvalidDataException($"Unexpected tag record kind: {udt.GetType().Name}, name: {udt.FullName}")
     };
   }
 
-  private StructDeclarationSyntax CreateStruct(PdbUdt udtType, string? name = null) {
-    name ??= GetOrCreateTypeName(udtType);
-    StructDeclarationSyntax csClass = CreateStructSyntax(udtType, name);
+  private StructDeclarationSyntax CreateStruct(CsStructure csStruct) {
+    StructDeclarationSyntax csClass = CreateStructSyntax(csStruct);
+    if (csStruct.SelfName == "_Minmax_traits_1") {
+      ;
+    }
 
-    int baseClassesCount = udtType.BaseClasses.Count;
+    if (csStruct.AllFields.Count == 0) {
+      csClass = csClass.WithSemicolonToken(Token(SyntaxKind.SemicolonToken));
+      return csClass;
+    }
+
+    int baseClassesCount = csStruct.BaseClasses.Length;
     for (int i = 0; i < baseClassesCount; i++) {
-      PdbTypeBaseClass baseClass = udtType.BaseClasses[i];
-      if (baseClass.Access == MemberAccess.Private) {
-        continue;
+      CsBaseClass baseClass = csStruct.BaseClasses[i];
+      if (baseClass.Record.Attributes.Access != MemberAccess.Private) {
+        FieldDeclarationSyntax field = CreateBaseTypeFieldSyntax(baseClass, baseClassesCount > 1 ? i : null);
+        csClass = csClass.AddMember(field);
       }
-
-      string baseName = GetOrCreateTypeName(baseClass.BaseType);
-      FieldDeclarationSyntax field = CreateBaseTypeFieldSyntax(baseClass, baseName, baseClassesCount > 1 ? i : null);
-      csClass = csClass.AddMember(field);
     }
 
     // Static fields
-    foreach (PdbTypeStaticField staticF in udtType.StaticFields) {
-      string fieldTypeName = GetQualifiedName(staticF.Type);
+    foreach (CsStaticField staticF in csStruct.StaticFields) {
+      string fieldTypeName = staticF.FieldType.FullName;
       switch (staticF) {
-        case PdbTypeConstant constant:
+        case CsConstantField constant:
           string value = fieldTypeName == "bool"
-            ? (ushort)constant.Value > 0 ? "true" : "false"
-            : constant.Value.ToString()!;
+            ? (ushort)constant.Constant.Value > 0 ? "true" : "false"
+            : constant.Constant.Value.ToString()!;
 
           // Support for: const ulong MyConst = unchecked((ulong)-1)
-          if (constant.Value is sbyte and < 0 && fieldTypeName == "ulong") {
-            value = $"unchecked((ulong){constant.Value})";
+          if (constant.Constant.Value is sbyte and < 0 && fieldTypeName == "ulong") {
+            value = $"unchecked((ulong){constant.Constant.Value})";
           }
 
           FieldDeclarationSyntax field = CreateConstFieldSyntax(constant, fieldTypeName, value);
           csClass = csClass.AddMember(field);
           continue;
-        case PdbTypeRegularStaticField staticField:
+        case CsRegularStaticField staticField:
           PropertyDeclarationSyntax prop = CreateStaticField(staticField, fieldTypeName);
           csClass = csClass.AddMember(prop);
           continue;
@@ -371,152 +332,101 @@ public sealed partial class SourceGen(string path, string namespaceName) : IDisp
     }
 
     // Instance fields
-    foreach (PdbTypeField f in udtType.Fields) {
+    foreach (CsInstanceField f in csStruct.InstanceFields) {
       // TODO: Generate properties that can handle get and set to bit fields.
-      if (f is PdbTypeBitField) {
+      if (f is CsBitField) {
         continue;
       }
 
       // TODO: Handle this better, maybe by creating an empty placeholder type for the missing type.
       //  Some fields are a pointer to a type, which the PDB may only have as a forward reference.
-      if (_missingTypes.Contains(f.Type.Name) ||
-          f.Type is PdbPointerType p && _missingTypes.Contains(p.ElementType.Name)) {
+      if (_missingTypes.Contains(f.FieldType.FullName) ||
+          f.FieldType is CsPointerType p && _missingTypes.Contains(p.ElementType.FullName)) {
         continue;
       }
 
-      string fieldName = GetQualifiedName(f.Type);
-      FieldDeclarationSyntax field = CreateInstanceFieldSyntax(f, fieldName);
+      FieldDeclarationSyntax field = CreateInstanceFieldSyntax(f);
       csClass = csClass.AddMember(field);
     }
 
     // Methods
-    // PdbFileReader doesn't handle methods, so we do it manually
-    var pdbFieldList = udtType.FieldRecords;
-    foreach (OneMethodRecord m in pdbFieldList.OfType<OneMethodRecord>()) {
-      break;
-
-      MethodDecl? method = CreateMethodDeclaration(m, m.Name.String);
+    foreach (CsInstanceMethod m in csStruct.InstanceMethods) {
+      MethodDecl? method = CreateMethodDeclaration(m);
       if (method is not null) {
         csClass = csClass.AddMember(method);
       }
     }
 
-    // Methods that share the same name (overloaded methods)
-    foreach (OverloadedMethodRecord olM in pdbFieldList.OfType<OverloadedMethodRecord>()) {
-      break;
-
-      foreach (OneMethodRecord m in olM.MethodList.As<MethodOverloadListRecord>(udtType.Pdb.PdbFile).Methods) {
-        MethodDecl? method = CreateMethodDeclaration(m, olM.Name.String);
-        if (method is not null) {
-          csClass = csClass.AddMember(method);
-        }
-      }
-    }
-
     // Nested types
-    if (udtType.ContainsNestedClass) {
-      foreach (NestedTypeRecord nested in pdbFieldList
-                 .OfType<NestedTypeRecord>()
-                 .Where(n => !n.Type.IsSimple)
-              ) {
-        // Must check that IsNested is false.
-        // For example, Array<String> may have a nested struct String, which refers to the top-level String class.
-        if (_pdb.GetType(nested.Type) is not PdbUdt { IsNested: true } nestedUdt) {
-          continue;
-        }
-
-        string fulName = GetQualifiedName(nestedUdt);
-
+    foreach (CsStructure nested in csStruct.NestedClasses) {
+      if (nested.FullName.Contains('<')) {
+        // Log.Warn($"Skipping nested type {nested.FullName} in {csStruct.FullName} because it is a template type.");
         continue;
-
-        if (nested.Name.String.Contains('<')) {
-          // Skip template classes
-          continue;
-        }
-
-        KeyValuePair<TypeIndex, PdbUdt> testUdt = default;
-
-        if (nestedUdt is not { TagRecord.IsForwardReference: false }) {
-          foreach (PdbType pdbType in _pdb.AsEnumerable()) {
-            if (pdbType is PdbUdt { TagRecord.IsForwardReference: false } udt &&
-                udt.UniqueName == nested.Name.String) {
-              nestedUdt = udt;
-              break;
-            }
-          }
-        }
-
-        if (nestedUdt is not null) {
-          if (nestedUdt.Name.Contains('<')) {
-            // Skip template classes
-            continue;
-          }
-
-          if (nestedUdt.TypeIndex == udtType.TypeIndex) {
-            Console.ForegroundColor = ConsoleColor.Yellow;
-            Console.WriteLine(
-              $"Warning: Skipping nested type {nestedUdt.Name} in {udtType.Name} because it is the same type as the parent.");
-            Console.ResetColor();
-            continue;
-          }
-
-          MemberDeclarationSyntax memberDeclarationSyntax = CreateType(nestedUdt);
-          csClass = csClass.AddMember(memberDeclarationSyntax);
-        }
       }
+
+      if (nested.Record.IsForwardReference) {
+        // Log.Warn($"Skipping nested forward reference type: {nested.FullName} in {csStruct.FullName}.");
+        continue;
+        // throw new InvalidOperationException($"Cannot create nested type for forward reference: {nested.FullName}");
+      }
+
+      if (nested.TypeIndex == csStruct.TypeIndex) {
+        // Log.Warn(
+        //   $"Skipping nested type {nested.FullName} in {csStruct.FullName} because it is the same type as the parent.");
+        continue;
+      }
+
+      MemberDeclarationSyntax memberDeclarationSyntax = CreateType(nested);
+      csClass = csClass.AddMember(memberDeclarationSyntax);
     }
 
     return csClass;
   }
 
-  private EnumDeclarationSyntax CreateEnum(PdbEnumType enumType, string? name = null) {
-    name ??= GetOrCreateTypeName(enumType);
-
-    string underlying = GetOrCreateTypeName(enumType.UnderlyingType);
+  private static EnumDeclarationSyntax CreateEnum(CsEnum csEnum) {
+    string underlying = csEnum.Underlying.FullName;
     if (underlying == "bool") {
       underlying = "byte";
     }
 
-    if (enumType.Values.Any(v => v.Value is uint and > int.MaxValue)) {
+    if (csEnum.Values.Any(v => v.Value is uint and > int.MaxValue)) {
       underlying = "uint";
     }
 
-    EnumDeclarationSyntax csEnum = CreateEnumSyntax(enumType, name);
+    EnumDeclarationSyntax enumSyntax = CreateEnumSyntax(csEnum);
     if (underlying != "int") {
-      csEnum = csEnum.AddBaseListTypes(SimpleBaseType(ParseTypeName(underlying)));
+      enumSyntax = enumSyntax.AddBaseListTypes(SimpleBaseType(ParseTypeName(underlying)));
     }
 
-    foreach (PdbEnumeratorValue enumValue in enumType.Values) {
+    foreach (CsEnumField enumValue in csEnum.Values) {
       EnumMemberDeclarationSyntax enumMember = CreateEnumMemberSyntax(enumValue);
-      csEnum = csEnum.AddMembers(enumMember);
+      enumSyntax = enumSyntax.AddMembers(enumMember);
     }
 
-    return csEnum;
+    return enumSyntax;
   }
 
-  private MethodDecl? CreateMethodDeclaration(OneMethodRecord methodRecord, string? name = null) {
-    name ??= methodRecord.Name.String;
-    MemberFunctionRecord funcRecord = methodRecord.Type.As<MemberFunctionRecord>(PdbFile);
+  private MethodDecl? CreateMethodDeclaration(CsInstanceMethod method, string? name = null) {
+    name ??= method.Name;
+    MemberFunctionRecord funcRecord = method.MethodRecord;
     bool isConstructor = funcRecord.Options.HasFlag(FunctionOptions.Constructor);
     var args = funcRecord.ArgumentList.As<ArgumentListRecord>(PdbFile).Arguments;
-    bool hasProc = ProcedureHelper.Names.TryGetValue(methodRecord.Type, out ProcedureInfo pInfo);
+    bool hasProc = method.ProcedureInfo is not null;
+    ProcedureInfo pInfo = method.ProcedureInfo.GetValueOrDefault();
 
     // Create parameters list
-    int i = 0;
     List<ParameterSyntax> parameterSyntaxes = [];
-    foreach (TypeIndex typeIndex in args) {
-      string arg = pInfo.GoodSize ? pInfo.Args[i].Name : $"arg{i + 1}";
-      i++;
+    foreach ((int i, CsType argType) in method.ParameterTypes.Index()) {
+      string arg = pInfo.GoodSize ? method.Args[i] : $"arg{i + 1}";
       parameterSyntaxes.Add(
-        Parameter(Identifier(arg))
-          // TODO: do NOT use typeIndex.ToString
-          .WithType(IdentifierName(typeIndex.ToString(PdbFile)))
+        Parameter(Identifier(arg)).WithType(IdentifierName(argType.FullName))
       );
     }
 
     MethodDecl methodDeclaration;
     if (isConstructor) {
       return null;
+      // TODO: Create constructor
 
       // Constructor with parameter list
       methodDeclaration =
@@ -527,6 +437,7 @@ public sealed partial class SourceGen(string path, string namespaceName) : IDisp
     }
     else if (name.Contains('~')) {
       return null;
+      // TODO: Maybe create destructor
 
       // This is a destructor
       methodDeclaration =
@@ -548,12 +459,12 @@ public sealed partial class SourceGen(string path, string namespaceName) : IDisp
       }
     }
 
-    // TODO: do NOT use typeIndex.ToString
+    // TODO: do NOT use typeIndex.ToString, use CsType.ToString
     string typeParams = string.Join(", ", args.Select(a => a.ToString(PdbFile).Sanitize()));
     var delegateParams = parameterSyntaxes.Select(p => Argument(IdentifierName(p.Identifier.Text)));
     if (hasProc) {
       string delegateBody =
-        $"((delegate* unmanaged<{typeParams}>)(mioMemoryAddress + {pInfo.Procedure.Offset}))";
+        $"((delegate* unmanaged<{typeParams}>)(mioMemoryAddress + {method.RelativeVirtualAddress}))";
       methodDeclaration = methodDeclaration
         .WithExpressionBody(ArrowExpressionClause(
           InvocationExpression(IdentifierName(delegateBody))
@@ -562,6 +473,10 @@ public sealed partial class SourceGen(string path, string namespaceName) : IDisp
     }
     else {
       return null;
+
+      // TODO: Should we implement this? Perhaps it should be something like:
+      //  => (mioMemoryAddress + (ThisClass.Addresses.ThisMethod ?? throw NIE ))
+      //  in case a mod adds an implementation for the missing method
 
       // emit throw new NotImplementedException();
       methodDeclaration = methodDeclaration
@@ -582,23 +497,23 @@ public sealed partial class SourceGen(string path, string namespaceName) : IDisp
 
   private bool TryResolveType(PdbType orig, [NotNullWhen(true)] out PdbType? resolved) {
     resolved = null;
-    if (orig is not PdbUdt { TagRecord.IsForwardReference: true } udt) {
+    if (orig is not PdbUserDefinedType { TagRecord.IsForwardReference: true } udt) {
       resolved = null;
       return false;
     }
 
-    resolved = _pdb.UserDefinedTypes
-      .OfType<PdbUdt>()
+    resolved = Pdb.UserDefinedTypes
+      .OfType<PdbUserDefinedType>()
       .LastOrDefault(r => !r.TagRecord.IsForwardReference && r.UniqueName == udt.TagRecord.UniqueName.String);
     return resolved is not null;
   }
 
-  private static int GetPointerDepth(PdbPointerType type) => GetPointerDepthAndElement(type, out _);
+  private static int GetPointerDepth(CsPointerType type) => GetPointerDepthAndElement(type, out _);
 
-  private static int GetPointerDepthAndElement(PdbPointerType type, out PdbType element) {
+  private static int GetPointerDepthAndElement(CsPointerType type, out CsType element) {
     element = type;
     int depth = 0;
-    while (element is PdbPointerType pointer) {
+    while (element is CsPointerType pointer) {
       depth++;
       element = pointer.ElementType;
     }
@@ -607,6 +522,10 @@ public sealed partial class SourceGen(string path, string namespaceName) : IDisp
   }
 
   public void Dispose() {
-    _pdb.Dispose();
+    Pdb.Dispose();
   }
+
+  // You must use CallingConvention.Cdecl
+  [DllImport("MyNativeLibrary.dll", CallingConvention = System.Runtime.InteropServices.CallingConvention.Cdecl)]
+  public static extern void NativeLog(int level, __arglist);
 }
