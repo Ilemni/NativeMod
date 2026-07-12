@@ -519,8 +519,4 @@ public sealed partial class SourceGen : IDisposable {
   public void Dispose() {
     Pdb.Dispose();
   }
-
-  // You must use CallingConvention.Cdecl
-  [DllImport("MyNativeLibrary.dll", CallingConvention = System.Runtime.InteropServices.CallingConvention.Cdecl)]
-  public static extern void NativeLog(int level, __arglist);
 }
