@@ -28,16 +28,16 @@ public sealed partial class SourceGen {
 
       IndentedTextWriter writer = _writers.InlineArrayWriter;
       // XmlDoc type info
-      writer.Write("// Inline array: ");
-      writer.Write(elementType.ToString());
-      writer.Write('[');
-      writer.Write(count);
-      writer.Write("] (TypeIndex ");
-      writer.Write(arr.TypeIndex);
-      writer.WriteLine(")");
+      writer.Write("/// Inline array: ");
+      writer.WriteXmlDocText(elementType.ToString());
+      writer.WriteXmlDocText("[");
+      writer.WriteXmlDocText(count.ToString());
+      writer.WriteXmlDocText("] (TypeIndex ");
+      writer.WriteXmlDocText(arr.TypeIndex.ToString());
+      writer.WriteXmlDocTextLine(")");
 
       // GeneratedCode attribute
-      WriteGeneratedCodeAttribute(writer);
+      writer.WriteGeneratedCodeAttribute();
 
       // InlineArray attribute
       writer.Write("[InlineArray(");

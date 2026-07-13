@@ -20,9 +20,6 @@ public sealed partial class SourceGen : IDisposable {
     MemoryAddressFieldName = namespaceName.Replace(".", "") + "MemoryAddress";
   }
 
-  private static readonly AssemblyName ThisAssemblyName = typeof(SourceGen).Assembly.GetName();
-  private static readonly string Version = ThisAssemblyName.Version?.ToString()!;
-
   /// Root namespace for all generated code.
   public readonly string Namespace;
 
@@ -222,13 +219,13 @@ public sealed partial class SourceGen : IDisposable {
   private static void WriteStruct(CsStructure csStruct, IndentedTextWriter writer) {
     // Write XML doc
     writer.Write("/// Struct type: ");
-    writer.Write(csStruct.Record.Name.String);
-    writer.Write(" (");
-    writer.Write(csStruct.Record.UniqueName.String);
-    writer.WriteLine(")");
+    writer.WriteXmlDocText(csStruct.Record.Name.String);
+    writer.WriteXmlDocText(" (");
+    writer.WriteXmlDocText(csStruct.Record.UniqueName.String);
+    writer.WriteXmlDocTextLine(")");
 
     // Write GeneratedCode attribute
-    WriteGeneratedCodeAttribute(writer);
+    writer.WriteGeneratedCodeAttribute();
 
     // Write StructLayout attribute with size
     bool prependGlobal = false;
@@ -260,10 +257,10 @@ public sealed partial class SourceGen : IDisposable {
         }
 
         writer.Write("/// Base class: ");
-        writer.Write(baseClass.BaseClass.Record.Name.String);
-        writer.Write(" (TypeIndex ");
-        writer.Write(baseClass.BaseClass.TypeIndex.ToString());
-        writer.WriteLine(")");
+        writer.WriteXmlDocText(baseClass.BaseClass.Record.Name.String);
+        writer.WriteXmlDocText(" (TypeIndex ");
+        writer.WriteXmlDocText(baseClass.BaseClass.TypeIndex.ToString());
+        writer.WriteXmlDocTextLine(")");
 
         // FieldOffset attribute
         prependGlobal = false;
@@ -294,13 +291,13 @@ public sealed partial class SourceGen : IDisposable {
         // XML doc for field
         writer.Write("/// Field: ");
         if (csStruct.PdbFile.TryGetRecord(field.FieldType.TypeIndex) is { } fieldTypeRecord) {
-          writer.Write(fieldTypeRecord.ToString(csStruct.PdbFile));
-          writer.Write(" (TypeIndex ");
-          writer.Write(field.FieldType.TypeIndex.ToString());
-          writer.WriteLine(")");
+          writer.WriteXmlDocText(fieldTypeRecord.ToString(csStruct.PdbFile));
+          writer.WriteXmlDocText(" (TypeIndex ");
+          writer.WriteXmlDocText(field.FieldType.TypeIndex.ToString());
+          writer.WriteXmlDocTextLine(")");
         }
         else {
-          writer.WriteLine(field.FieldType.TypeIndex.ToString());
+          writer.WriteXmlDocTextLine(field.FieldType.TypeIndex.ToString());
         }
 
         if (field is CsConstantField constant) {
@@ -355,13 +352,13 @@ public sealed partial class SourceGen : IDisposable {
         // XML doc for field
         writer.Write("/// Field: ");
         if (csStruct.PdbFile.TryGetRecord(field.FieldType.TypeIndex) is { } fieldTypeRecord) {
-          writer.Write(fieldTypeRecord.ToString(csStruct.PdbFile));
-          writer.Write(" (TypeIndex ");
-          writer.Write(field.FieldType.TypeIndex.ToString());
-          writer.WriteLine(")");
+          writer.WriteXmlDocText(fieldTypeRecord.ToString(csStruct.PdbFile));
+          writer.WriteXmlDocText(" (TypeIndex ");
+          writer.WriteXmlDocText(field.FieldType.TypeIndex.ToString());
+          writer.WriteXmlDocTextLine(")");
         }
         else {
-          writer.WriteLine(field.FieldType.TypeIndex.ToString());
+          writer.WriteXmlDocTextLine(field.FieldType.TypeIndex.ToString());
         }
 
         // FieldOffset attribute
@@ -447,13 +444,13 @@ public sealed partial class SourceGen : IDisposable {
 
     // Write XML doc
     writer.Write("/// Enum type: ");
-    writer.Write(csEnum.Record.Name.String);
-    writer.Write(" (");
-    writer.Write(csEnum.Record.UniqueName.String);
-    writer.WriteLine(")");
+    writer.WriteXmlDocText(csEnum.Record.Name.String);
+    writer.WriteXmlDocText(" (");
+    writer.WriteXmlDocText(csEnum.Record.UniqueName.String);
+    writer.WriteXmlDocTextLine(")");
 
     // Write GeneratedCode attribute
-    WriteGeneratedCodeAttribute(writer);
+    writer.WriteGeneratedCodeAttribute();
 
     // Write enum declaration
     writer.Write("public enum ");
@@ -476,17 +473,6 @@ public sealed partial class SourceGen : IDisposable {
     writer.Indent--;
     writer.WriteLine("}");
     writer.WriteLine();
-  }
-
-  private static void WriteGeneratedCodeAttribute(IndentedTextWriter writer) {
-    bool prependGlobal = false;
-    writer.Write("[");
-    writer.WriteIf("global::System.CodeDom.Compiler.", prependGlobal);
-    writer.Write("GeneratedCode(\"");
-    writer.Write(ThisAssemblyName.Name);
-    writer.Write("\", \"");
-    writer.Write(Version);
-    writer.WriteLine("\")]");
   }
 
   public void Dispose() {
