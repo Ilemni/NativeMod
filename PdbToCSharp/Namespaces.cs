@@ -1,106 +1,96 @@
-﻿using System.Runtime.InteropServices;
-using Microsoft.CodeAnalysis.CSharp;
-using Microsoft.CodeAnalysis.CSharp.Syntax;
+﻿using System.CodeDom.Compiler;
 using PdbToCSharp.Types;
 
 namespace PdbToCSharp;
 
-internal sealed class Namespaces {
-  private record struct Item(FileScopedNamespaceDeclarationSyntax Ns, string OutputName) {
-    public FileScopedNamespaceDeclarationSyntax Ns = Ns;
-  }
+using Writer = IndentedTextWriter;
 
-  public Namespaces(string namespaceName) {
-    _namespaceName = namespaceName;
-    _baseNs = SourceGen.CreateNamespaceSyntax(namespaceName);
-    _rootClassNamespace = new Item(_baseNs, "Generated__Root_Classes.cs");
-    _arrayNs = _rootClassNamespace with { OutputName = "Generated__Root_InlineArrays.cs" };
-    _rootEnumNamespace = _rootClassNamespace with { OutputName = "Generated__Root_Enums.cs" };
-    _rootUnionNamespace = _rootClassNamespace with { OutputName = "Generated__Root_Unions.cs" };
-    _rootTemplateClassNamespace = _rootClassNamespace with { OutputName = "Generated__Root_TemplateClasses.cs" };
-    _rootTemplateUnionNamespace = _rootClassNamespace with { OutputName = "Generated__Root_TemplateUnions.cs" };
-  }
+internal sealed class Namespaces(string outputPath, string namespaceName) : IDisposable {
+  private readonly Dictionary<string, Writer> _namespaceMap = [];
+  private Writer? _classNs;
+  private Writer? _enumNs;
+  private Writer? _unionNs;
+  private Writer? _templateClassNs;
+  private Writer? _templateUnionNs;
+  private Writer? _arrayNs; // Inline arrays
 
-  private readonly string _namespaceName;
+  // Lazy loading ensures none of these create files if there are no types that would be written to them.
+  private Writer ClassWriter => _classNs ??= CreateWriter("Generated__Root_Classes.cs");
+  public Writer InlineArrayWriter => _arrayNs ??= CreateWriter("Generated__Root_InlineArrays.cs");
+  private Writer EnumWriter => _enumNs ??= CreateWriter("Generated__Root_Enums.cs");
+  private Writer UnionWriter => _unionNs ??= CreateWriter("Generated__Root_Unions.cs");
+  private Writer TemplateClassWriter => _templateClassNs ??= CreateWriter("Generated__Root_TemplateClasses.cs");
+  private Writer TemplateUnionWriter => _templateUnionNs ??= CreateWriter("Generated__Root_TemplateUnions.cs");
 
-  private readonly FileScopedNamespaceDeclarationSyntax _baseNs;
-
-  private readonly Dictionary<string, Item> _namespaceMap = [];
-  private Item _rootClassNamespace;
-  private Item _rootEnumNamespace;
-  private Item _rootUnionNamespace;
-  private Item _rootTemplateClassNamespace;
-  private Item _rootTemplateUnionNamespace;
-  private Item _arrayNs; // Inline arrays
-
-  public ref FileScopedNamespaceDeclarationSyntax InlineArrayNs => ref _arrayNs.Ns;
-  public ref FileScopedNamespaceDeclarationSyntax EnumNs => ref _rootEnumNamespace.Ns;
-
-  public ref FileScopedNamespaceDeclarationSyntax GetMatching(CsUdt udt) {
+  public Writer GetMatching(CsUdt udt) {
     string? csNamespace = udt.Namespace;
     if (csNamespace is not null) {
-      if (!_namespaceMap.TryGetValue(csNamespace, out Item item)) {
-        item = new Item(_baseNs.WithName(SyntaxFactory.ParseName(_namespaceName + '.' + csNamespace)), $"Generated_{csNamespace.Replace('.', '_')}.cs");
-        _namespaceMap[csNamespace] = item;
+      if (_namespaceMap.TryGetValue(csNamespace, out Writer? writer)) {
+        return writer;
       }
 
-      return ref CollectionsMarshal.GetValueRefOrAddDefault(_namespaceMap, csNamespace, out bool _).Ns;
+      writer = CreateWriter($"Generated_{csNamespace.Replace('.', '_')}.cs", csNamespace);
+      _namespaceMap[csNamespace] = writer;
+
+      return writer;
     }
 
     string origName = udt.Record.Name.String;
     if (udt is CsEnum) {
-      return ref EnumNs;
+      return EnumWriter;
     }
 
-    // TODO: Replace all of the above fields with a dictionary.
-    //  Probably not needed, if we eventually just Parallel.ForEach over things and write them to their own files.
-    //  In that case, this type will be deleted.
     string? name = udt.Namespace;
     if (name is null) {
-      if (udt is CsUnion) {
-        return ref _rootUnionNamespace.Ns;
-      }
-
-      return ref _rootClassNamespace.Ns;
+      return udt is CsUnion ? UnionWriter : ClassWriter;
     }
 
     if (origName.Contains('<')) {
-      if (udt is CsUnion) {
-        return ref _rootTemplateUnionNamespace.Ns;
-      }
-
-      return ref _rootTemplateClassNamespace.Ns;
+      return udt is CsUnion ? TemplateUnionWriter : TemplateClassWriter;
     }
 
-    if (udt is CsUnion) {
-      return ref _rootUnionNamespace.Ns;
+    return udt is CsUnion ? UnionWriter : ClassWriter;
+  }
+
+  private Writer CreateWriter(string path, string? csNamespaceName = null) {
+    string fullPath = Path.Join(outputPath, path);
+    Writer writer = new(new StreamWriter(fullPath));
+    writer.WriteLine(WriterStart);
+    writer.Write("namespace ");
+    writer.Write(namespaceName);
+    if (csNamespaceName is not null) {
+      writer.Write('.');
+      writer.Write(csNamespaceName);
     }
-
-    return ref _rootClassNamespace.Ns;
+    writer.WriteLine(';');
+    writer.WriteLine();
+    return writer;
   }
 
-  public void WriteAllToFiles(string outputPath) {
-    var arr = _namespaceMap.Values
-      .Append(_arrayNs)
-      .Append(_rootClassNamespace)
-      .Append(_rootEnumNamespace)
-      .Append(_rootUnionNamespace)
-      .Append(_rootTemplateClassNamespace)
-      .Append(_rootTemplateUnionNamespace);
-    Parallel.ForEach(arr, item => {
-      if (item.Ns.Members.Any()) {
-        item.Ns.WriteToFile(Path.Join(outputPath, item.OutputName));
-      }
-    });
-  }
-
-  private static bool MatchName(string toCompare, params ReadOnlySpan<string> args) {
-    foreach (string arg in args) {
-      if (toCompare.Contains(arg, StringComparison.OrdinalIgnoreCase)) {
-        return true;
-      }
+  public void Dispose() {
+    _classNs?.Dispose();
+    _arrayNs?.Dispose();
+    _enumNs?.Dispose();
+    _unionNs?.Dispose();
+    _templateClassNs?.Dispose();
+    _templateUnionNs?.Dispose();
+    foreach (Writer writer in _namespaceMap.Values) {
+      writer.Dispose();
     }
-
-    return false;
   }
+
+  private const string WriterStart =
+    """
+    // <auto-generated>
+    // This code was generated by PdbToCSharp, a tool that generates C# bindings from PDB files.
+    // Changes to this file may cause incorrect behavior and will be lost if the code is regenerated.
+    // </auto-generated>
+    
+    #pragma warning disable
+    
+    using System.CodeDom.Compiler;
+    using System.Runtime.CompilerServices;
+    using System.Runtime.InteropServices;
+    
+    """;
 }

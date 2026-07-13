@@ -1,12 +1,10 @@
 ﻿using System.Text;
-using Microsoft.CodeAnalysis;
-using Microsoft.CodeAnalysis.CSharp.Syntax;
 
 namespace PdbToCSharp;
 
 internal static class SourceGenExtensions {
   extension(string str) {
-    public string EscapeField() => ReservedKeywords.Contains(str) ? $"@{str}" : str;
+    public string KeywordToVerbatim() => ReservedKeywords.Contains(str) || str.StartsWith("__") ? $"@{str}" : str;
 
     public string Sanitize() {
       if (str switch {
@@ -98,35 +96,6 @@ internal static class SourceGenExtensions {
     }
   }
 
-  extension(FileScopedNamespaceDeclarationSyntax ns) {
-    public void WriteToFile(string filePath) {
-      Directory.CreateDirectory(Path.GetDirectoryName(filePath)!);
-      using StreamWriter writer = new(filePath);
-      ns.NormalizeWhitespace().WriteTo(writer);
-    }
-  }
-
-
-  extension(FileScopedNamespaceDeclarationSyntax ns) {
-    public FileScopedNamespaceDeclarationSyntax AddMember(MemberDeclarationSyntax member) {
-      NsMembers[0] = member;
-      ns = ns.AddMembers(NsMembers);
-      NsMembers[0] = null!;
-      return ns;
-    }
-  }
-
-  extension(StructDeclarationSyntax structDecl) {
-    public StructDeclarationSyntax AddMember(MemberDeclarationSyntax member) {
-      NsMembers[0] = member;
-      structDecl = structDecl.AddMembers(NsMembers);
-      NsMembers[0] = null!;
-      return structDecl;
-    }
-  }
-
-  private static readonly MemberDeclarationSyntax[] NsMembers = new MemberDeclarationSyntax[1];
-  private static readonly EnumMemberDeclarationSyntax[] EuMembers = new EnumMemberDeclarationSyntax[1];
 
   private static readonly string[] ReservedKeywords = [
     "abstract",

@@ -242,23 +242,8 @@ internal static partial class TypeRecordExtensions {
     return sb.Append(_currentMethodOverloadName ?? methodMember.Name.String)
       .Append('(')
       .Append(args.ToString(pdb))
-      .Append(") {")
-      // WriteMethodBody();
-      .Append('}')
+      .Append(')')
       .ToString();
-
-    void WriteMethodBody() {
-      // _padding += 4;
-      sb.AppendLine()
-        .Append("return CallAssembly__FromGenerated<")
-        .Append(methodFunction.ReturnType.ToString(pdb))
-        .Append(">(")
-        .Append('0') // TODO: Replace this with an actual proper value
-        // TODO: Pass arguments to CallAssembly__FromGenerated
-        .Append(");");
-      // _padding -= 4;
-      sb.AppendLine();
-    }
   }
 
   public static string ToString(this OverloadedMethodRecord overloadedMethodRecord, PdbFile pdb) {

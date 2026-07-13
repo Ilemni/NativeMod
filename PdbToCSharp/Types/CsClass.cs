@@ -1,6 +1,5 @@
 ﻿using System.Diagnostics;
 using System.Runtime.CompilerServices;
-using SharpPdb.Native;
 using SharpPdb.Native.Types;
 using SharpPdb.Windows;
 using SharpPdb.Windows.GSI;
@@ -17,15 +16,16 @@ public abstract class CsType(SourceGen sourceGen, TypeIndex index, ModifierOptio
   protected internal SourceGen SourceGen { get; } = sourceGen;
 
   [DebuggerBrowsable(DebuggerBrowsableState.Never)]
-  protected internal PdbFileReader Pdb => SourceGen.Pdb;
-
-  [DebuggerBrowsable(DebuggerBrowsableState.Never)]
   protected internal PdbFile PdbFile => SourceGen.Pdb.PdbFile;
 
   public abstract ulong Size { get; }
 
   public string SelfName => field ??= ValidateName(CreateSelfName(), true);
   public string FullName => field ??= ValidateName(CreateFullName(), false);
+
+  public virtual string FullyQualifiedName => SelfName;
+
+  public virtual string? Namespace { get; set; }
 
   protected abstract string CreateSelfName();
   protected virtual string CreateFullName() => SelfName;
@@ -134,12 +134,21 @@ public abstract class CsType(SourceGen sourceGen, TypeIndex index, ModifierOptio
   }
 
   public override string ToString() => FullName;
+
+  protected string QualifyWithGlobal() =>
+    "global::" +
+    SourceGen.Namespace + '.' +
+    (Namespace is { } ns ? ns + '.' : "") +
+    FullName;
 }
 
 public sealed class CsSimpleType(SourceGen sourceGen, TypeIndex index, ModifierOptions modifiers)
   : CsType(sourceGen, index, modifiers) {
   public override string ToString() => $"{FullName} ({TypeIndex.SimpleKind})";
   protected override string CreateSelfName() => SourceGen.ToCsName(TypeIndex);
+
+  // TODO: add global:: if there is a namespace (System.Half, etc)
+  public override string FullyQualifiedName => SelfName;
 
   public override ulong Size {
     get {
@@ -186,6 +195,10 @@ public sealed class CsPointerType : CsType {
   public readonly PointerRecord PointerRecord;
   public readonly CsType ElementType;
 
+  // TODO: use correct number of '*' in name
+  public override string? Namespace => ElementType.Namespace;
+  public override string FullyQualifiedName => ElementType.FullyQualifiedName + "*";
+
   public override string ToString() => $"pointer to {ElementType.FullName}";
   protected override string CreateSelfName() => $"{ElementType.SelfName}*";
 
@@ -201,10 +214,12 @@ public abstract class CsUdt(TypeIndex index, SourceGen sourceGen, TagRecord reco
   [DebuggerBrowsable(DebuggerBrowsableState.Never)]
   public virtual TagRecord Record { get; } = record;
 
-  public string? Namespace {
+  public override string? Namespace {
     get => field ??= Parent?.Namespace;
-    private set;
+    set;
   }
+
+  public override string FullyQualifiedName => field ??= QualifyWithGlobal();
 
   public CsUdt? Parent { get; private set; }
   public NestedTypeRecord? NestedTypeRecord { get; private set; }
@@ -493,6 +508,7 @@ public sealed class CsEnum : CsUdt {
 
   public override EnumRecord Record => (EnumRecord)base.Record;
   public CsType Underlying => field ??= GetOrCreate(SourceGen, Record.UnderlyingType);
+
   public override string ToString() => NestedTypeRecord is null
     ? $"enum {FullName}"
     : $"enum {FullName} ({SelfName})";
@@ -504,10 +520,8 @@ public sealed class CsEnum : CsUdt {
 }
 
 public sealed class CsEnumField(EnumeratorRecord record) {
-  public readonly EnumeratorRecord Record = record;
-
-  public string Name => Record.Name.String;
-  public object Value => Record.Value;
+  public readonly string Name = record.Name.String;
+  public readonly object Value = record.Value;
 
   public override string ToString() => $"{Name} = {Value}";
 }
@@ -520,6 +534,8 @@ public sealed class CsArray(ArrayRecord record, TypeIndex index, SourceGen sourc
 
   public override ulong Size => Record.Size;
 
+  public override string FullyQualifiedName => field ??= QualifyWithGlobal();
+
   public override string ToString() => $"Array of {ElementType} [{Count}]";
 
   protected override string CreateSelfName() {
@@ -531,7 +547,11 @@ public sealed class CsArray(ArrayRecord record, TypeIndex index, SourceGen sourc
       end += '_' + ((int)a.Count).ToString();
     }
 
-    string elementName = rootElement.FullName.SanitizeName(true, true);
+    string innerName = rootElement.Namespace is null
+      ? rootElement.FullName
+      : rootElement.Namespace + '.' + rootElement.FullName;
+
+    string elementName = innerName.SanitizeName(true, true);
     string result = start + elementName + end;
     return result;
   }
@@ -543,7 +563,6 @@ public class CsInstanceField(CsStructure container, DataMemberRecord record) {
 
   public string Name => Record.Name.String;
   public virtual TypeIndex Type => Record.Type;
-  public TypeRecord TypeRecord => field ??= Container.PdbFile.GetRecord(Type);
   public uint Offset => (uint)Record.FieldOffset;
 
   public CsType FieldType => CsType.GetOrCreate(Container.SourceGen, Type);
@@ -586,7 +605,7 @@ public class CsStaticField(CsStructure container, StaticDataMemberRecord record)
 
   public readonly StaticDataMemberRecord Record = record;
 
-  public string Name => Record.Name.String;
+  public virtual string Name => Record.Name.String;
   public TypeIndex Type => Record.Type;
 
   public CsType FieldType {
@@ -612,9 +631,39 @@ public class CsStaticField(CsStructure container, StaticDataMemberRecord record)
   }
 }
 
-public sealed class CsConstantField(CsStructure container, StaticDataMemberRecord record, ConstantSymbol constant)
-  : CsStaticField(container, record) {
-  public readonly ConstantSymbol Constant = constant;
+public sealed class CsConstantField : CsStaticField {
+  public CsConstantField(CsStructure container, StaticDataMemberRecord record, ConstantSymbol symbol) : base(container,
+    record) {
+    Symbol = symbol;
+
+    string symName = symbol.Name.String;
+    int index = symName.LastIndexOf("::", StringComparison.Ordinal);
+    Name = index != -1 ? symName[(index + 2)..] : symName;
+
+#if DEBUG
+    if (!types.TryGetValue(FieldType, out var set)) {
+      set = [symbol.Value.GetType()];
+      types[FieldType] = set;
+    }
+    else {
+      set.Add(symbol.Value.GetType());
+    }
+
+    if (FieldType.SelfName == "float") {
+      floatConstants.Add((uint)symbol.Value);
+    }
+#endif
+  }
+
+#if DEBUG
+  public static readonly Dictionary<CsType, HashSet<Type>> types = [];
+  public static readonly HashSet<uint> floatConstants = [];
+#endif
+
+  public readonly ConstantSymbol Symbol;
+
+  public override string Name { get; }
+  public object Value => Symbol.Value;
 
   public override string ToString() {
     string access = Record.Attributes.Access switch {
@@ -624,7 +673,7 @@ public sealed class CsConstantField(CsStructure container, StaticDataMemberRecor
       _ => string.Empty
     };
 
-    return $"{access}static const {FieldType.FullName} {Name} = {Constant.Value}";
+    return $"{access}static const {FieldType.FullName} {Name} = {Symbol.Value}";
   }
 }
 
@@ -650,7 +699,9 @@ public sealed class CsThreadLocalStorageField(
 public sealed class CsRegularStaticField(CsStructure container, StaticDataMemberRecord record, DataSymbol data)
   : CsStaticField(container, record) {
   public readonly DataSymbol Data = data;
-  public readonly ulong RelativeVirtualAddress = container.PdbFile.FindRelativeVirtualAddress(data.Segment, data.Offset);
+
+  public readonly ulong RelativeVirtualAddress =
+    container.PdbFile.FindRelativeVirtualAddress(data.Segment, data.Offset);
 
 
   public override string ToString() {

@@ -1,6 +1,4 @@
-﻿using System.Diagnostics;
-using Microsoft.CodeAnalysis;
-using Microsoft.CodeAnalysis.CSharp;
+﻿using Microsoft.CodeAnalysis.CSharp;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
 using PdbToCSharp.Types;
 using SharpPdb.Windows;
@@ -10,190 +8,96 @@ using static Microsoft.CodeAnalysis.CSharp.SyntaxFactory;
 namespace PdbToCSharp;
 
 public partial class SourceGen {
-  // Attributes
-  private static readonly AttributeListSyntax CompGenAttribute =
-    AttributeList(
-      SingletonSeparatedList(Attribute(IdentifierName("GeneratedCode(\"PdbToCSharp\", \"0.1.0.0\")"))));
 
-  private static SyntaxList<AttributeListSyntax> ClassAttribute(ulong structSize) =>
-    List<AttributeListSyntax>(
-    [
-      CompGenAttribute,
-      CreateStructLayoutAttribute(structSize)
-    ]);
+  // Use as reference for creating ctor, dtor, and partially the method body
+  private static BaseMethodDeclarationSyntax? CreateMethodDeclaration(CsInstanceMethod method, string? name = null) {
+    name ??= method.Name;
+    MemberFunctionRecord funcRecord = method.MethodRecord;
+    bool isConstructor = funcRecord.Options.HasFlag(FunctionOptions.Constructor);
+    var args = funcRecord.ArgumentList.As<ArgumentListRecord>(method.PdbFile).Arguments;
+    bool hasProc = method.ProcedureInfo is not null;
+    ProcedureInfo pInfo = method.ProcedureInfo.GetValueOrDefault();
 
-  private static AttributeListSyntax CreateFieldOffsetAttribute(int offset) {
-    return
-      AttributeList(SingletonSeparatedList(
-        Attribute(IdentifierName("FieldOffset"))
-          .WithArgumentList(
-            AttributeArgumentList(
-              SingletonSeparatedList(
-                AttributeArgument(
-                  LiteralExpression(
-                    SyntaxKind.NumericLiteralExpression,
-                    Literal(offset))))))));
-  }
+    // Create parameters list
+    List<ParameterSyntax> parameterSyntaxes = [];
+    foreach ((int i, CsType argType) in method.ParameterTypes.Index()) {
+      string arg = pInfo.GoodSize ? method.Args[i] : $"arg{i + 1}";
+      parameterSyntaxes.Add(
+        Parameter(Identifier(arg)).WithType(IdentifierName(argType.FullName))
+      );
+    }
 
-  private static AttributeListSyntax CreateStructLayoutAttribute(ulong size) {
-    return AttributeList(SingletonSeparatedList(Attribute(IdentifierName("StructLayout"))
-      .WithArgumentList(
-        AttributeArgumentList(SeparatedList<AttributeArgumentSyntax>(
-          new SyntaxNodeOrToken[] {
-            AttributeArgument(
-              MemberAccessExpression(
-                SyntaxKind.SimpleMemberAccessExpression, IdentifierName("LayoutKind"),
-                IdentifierName("Explicit"))),
-            Token(SyntaxKind.CommaToken),
-            AttributeArgument(
-                LiteralExpression(SyntaxKind.NumericLiteralExpression, Literal((int)size)))
-              .WithNameEquals(NameEquals(IdentifierName("Size")))
-          })))));
-  }
+    BaseMethodDeclarationSyntax methodDeclaration;
+    if (isConstructor) {
+      return null;
+      // TODO: Create constructor
 
-  // Keywords and Modifiers
-  private static readonly SyntaxToken PubKw = Token(SyntaxKind.PublicKeyword);
-  private static readonly SyntaxToken StaticKw = Token(SyntaxKind.StaticKeyword);
-  private static readonly SyntaxToken PartialKw = Token(SyntaxKind.PartialKeyword);
-  private static readonly SyntaxTokenList Pub = [PubKw];
-  private static readonly SyntaxTokenList Private = [Token(SyntaxKind.PrivateKeyword)];
-  private static readonly SyntaxTokenList PubStatic = [PubKw, StaticKw];
-  private static readonly SyntaxTokenList PubConst = [PubKw, Token(SyntaxKind.ConstKeyword)];
-  private static readonly SyntaxTokenList PubUnsafe = [PubKw, Token(SyntaxKind.UnsafeKeyword)];
-  private static readonly SyntaxTokenList StructKws = PubUnsafe /*.Add(PartialKw)*/;
+      // Constructor with parameter list
+      methodDeclaration =
+        ConstructorDeclaration(name)
+          .WithParameterList(ParameterList(SeparatedList(parameterSyntaxes)))
+          .WithSemicolonToken(Token(SyntaxKind.SemicolonToken));
+    }
+    else if (name.Contains('~')) {
+      return null;
+      // TODO: Maybe create destructor
 
-  // Creating Syntax Nodes
-  internal static FileScopedNamespaceDeclarationSyntax CreateNamespaceSyntax(string namespaceName) {
-    return FileScopedNamespaceDeclaration(IdentifierName(namespaceName))
-      .WithUsings(List([
-        UsingDirective(IdentifierName("System.Runtime.CompilerServices")),
-        UsingDirective(IdentifierName("System.Runtime.InteropServices")),
-        UsingDirective(IdentifierName("MioModLoader.ModLoader")).WithStaticKeyword(StaticKw)
-      ]))
-      .WithNamespaceKeyword(
-        Token(
-          TriviaList(
-            Comment("// ReSharper disable InvalidXmlDocComment"),
-            Comment("// ReSharper disable RedundantUnsafeContext"),
-            Comment("// ReSharper disable InconsistentNaming"),
-            Comment("// ReSharper disable UnusedType.Global")),
-          SyntaxKind.NamespaceKeyword,
-          TriviaList()));
-  }
+      // This is a destructor
+      methodDeclaration =
+        DestructorDeclaration(Identifier(name[1..]))
+          .WithSemicolonToken(Token(SyntaxKind.SemicolonToken));
+    }
+    else {
+      methodDeclaration =
+        // TODO: do NOT use typeIndex.ToString
+        MethodDeclaration(IdentifierName(funcRecord.ReturnType.ToString(method.PdbFile).SanitizeName()), name)
+          .WithParameterList(ParameterList(SeparatedList(parameterSyntaxes)))
+          .WithSemicolonToken(Token(SyntaxKind.SemicolonToken));
 
-  private static StructDeclarationSyntax CreateInlineArraySyntax(CsArray arr, string arrayName,
-    string elementName, ulong count) {
-    const string fieldName = "element0";
+      // Static method
+      if (funcRecord.ThisType is { IsSimple: true, SimpleKind: SimpleTypeKind.Void }) {
+        // methodDeclaration = methodDeclaration
+        //   .AddModifiers(StaticKw);
+      }
+    }
 
-    StructDeclarationSyntax csArray = StructDeclaration(arrayName)
-      .WithAttributeLists(List<AttributeListSyntax>([
-        CompGenAttribute,
-        AttributeList(SingletonSeparatedList(Attribute(IdentifierName($"InlineArray({count})"))))
-      ]))
-      .WithModifiers(PubUnsafe)
-      .WithMembers(SingletonList<MemberDeclarationSyntax>(
-        FieldDeclaration(
-            VariableDeclaration(IdentifierName(elementName))
-              .WithVariables(SingletonSeparatedList(VariableDeclarator(fieldName))))
-          .WithModifiers(TokenList(Token(SyntaxKind.PrivateKeyword)))
-      ))
-      .WithLeadingTrivia(Comment($"/// Inline array type: {arr.FullName}"));
-    return csArray;
-  }
+    // TODO: do NOT use typeIndex.ToString, use CsType.ToString
+    string typeParams = string.Join(", ", args.Select(a => a.ToString(method.PdbFile).Sanitize()));
+    var delegateParams = parameterSyntaxes.Select(p => Argument(IdentifierName(p.Identifier.Text)));
+    if (hasProc) {
+      string delegateBody =
+        $"((delegate* unmanaged<{typeParams}>)(mioMemoryAddress + {method.RelativeVirtualAddress}))";
+      methodDeclaration = methodDeclaration
+        .WithExpressionBody(ArrowExpressionClause(
+          InvocationExpression(IdentifierName(delegateBody))
+            .WithArgumentList(ArgumentList(SeparatedList(delegateParams)))
+        ));
+    }
+    else {
+      return null;
 
-  private static StructDeclarationSyntax CreateStructSyntax(CsStructure udtType) {
-    StructDeclarationSyntax csClass = StructDeclaration(udtType.SelfName)
-      .WithAttributeLists(ClassAttribute(udtType.Size))
-      .WithModifiers(StructKws)
-      .WithLeadingTrivia(Comment(
-        $"/// {(udtType is CsStruct ? "struct" : "union")} type: {udtType.Record.Name} ({udtType.TypeIndex})"));
-    return csClass;
-  }
+      // TODO: Should we implement this? Perhaps it should be something like:
+      //  => (mioMemoryAddress + (ThisClass.Addresses.ThisMethod ?? throw NIE ))
+      //  in case a mod adds an implementation for the missing method
 
-  private static EnumDeclarationSyntax CreateEnumSyntax(CsEnum enumType) {
-    return EnumDeclaration(enumType.SelfName)
-      .WithAttributeLists([CompGenAttribute])
-      .WithModifiers(Pub)
-      .WithLeadingTrivia(Comment($"/// Enum type: {enumType.Record.Name} ({enumType.Record.UniqueName})"));
-  }
-
-  private static EnumMemberDeclarationSyntax CreateEnumMemberSyntax(CsEnumField enumValue) {
-    EnumMemberDeclarationSyntax enumMember = EnumMemberDeclaration(enumValue.Name)
-      .WithEqualsValue(EqualsValueClause(
-        enumValue.Value is bool b
-          ? LiteralExpression(b ? SyntaxKind.TrueLiteralExpression : SyntaxKind.FalseLiteralExpression)
-          : LiteralExpression(
-            SyntaxKind.NumericLiteralExpression,
-            enumValue.Value switch {
-              int v => Literal(v),
-              uint v => v > int.MaxValue ? Literal(v) : Literal((int)v),
-              short v => Literal(v),
-              ushort v => Literal(v),
-              sbyte v => Literal(v),
-              byte v => Literal(v),
-              long v => v > int.MaxValue ? Literal(v) : Literal((int)v),
-              ulong v => Literal(v),
-              float v => Literal(v),
-              double v => Literal(v),
-              _ => throw new UnreachableException(
-                $"Unexpected enum value type: {enumValue.Value.GetType().Name} for {enumValue.Name}")
-            }
+      // emit throw new NotImplementedException();
+      methodDeclaration = methodDeclaration
+        .WithExpressionBody(ArrowExpressionClause(
+            InvocationExpression(
+                MemberAccessExpression(
+                  SyntaxKind.SimpleMemberAccessExpression,
+                  IdentifierName("throw"),
+                  IdentifierName("new NotImplementedException")))
+              .WithArgumentList(ArgumentList())
           )
-      ));
-    return enumMember;
+        );
+    }
+
+
+    return methodDeclaration;
   }
 
-  private static FieldDeclarationSyntax CreateConstFieldSyntax(CsConstantField constant, string fieldTypeName,
-    string value) {
-    return FieldDeclaration(
-        VariableDeclaration(IdentifierName(fieldTypeName))
-          .WithVariables(
-            SingletonSeparatedList(
-              VariableDeclarator(constant.Name.EscapeField())
-                .WithInitializer(
-                  EqualsValueClause(
-                    IdentifierName(constant.Constant.TypeIndex.IsSimple ? value : $"({fieldTypeName}){value}")
-                  )))))
-      .WithModifiers(PubConst);
-  }
-
-  private static PropertyDeclarationSyntax CreateStaticField(CsRegularStaticField regularStaticField,
-    string fieldTypeName) {
-    return PropertyDeclaration(IdentifierName(fieldTypeName), Identifier(regularStaticField.Name.EscapeField()))
-      .WithModifiers(PubStatic)
-      .WithExpressionBody(
-        ArrowExpressionClause(
-          IdentifierName(
-            $"*(({fieldTypeName}*)(mioMemoryAddress + {regularStaticField.RelativeVirtualAddress}))")))
-      .WithSemicolonToken(Token(SyntaxKind.SemicolonToken));
-  }
-
-  private static FieldDeclarationSyntax CreateInstanceFieldSyntax(CsInstanceField field) {
-    AttributeListSyntax fieldOffsetAttribute = CreateFieldOffsetAttribute((int)field.Offset);
-    return FieldDeclaration(
-        VariableDeclaration(IdentifierName(field.FieldType.FullName))
-          .AddVariables(VariableDeclarator(field.Name.SanitizeName().EscapeField())))
-      .AddAttributeLists(fieldOffsetAttribute)
-      .WithModifiers(field.Record.Attributes.Access == MemberAccess.Public ? Pub : Private)
-      .WithLeadingTrivia(Comment(
-        /*field is PdbTypeBitField bf
-          ? $"/// BitField: {bf.Type.Name} (TypeIndex: {bf.Type.TypeIndex}) (Pos:{bf.Offset} Off:{bf.BitOffset} Size:{bf.BitSize})"
-          :*/
-        $"/// Type: {field.FieldType.FullName} (TypeIndex: {field.Type}) {(field.FieldType is CsUdt { Record.IsForwardReference: true } ? "(Forward Reference)" : "")}"
-      ));
-  }
-
-  private static FieldDeclarationSyntax CreateBaseTypeFieldSyntax(CsBaseClass baseClass, int? i) {
-    AttributeListSyntax fieldOffsetAttribute = CreateFieldOffsetAttribute((int)baseClass.Record.Offset);
-    FieldDeclarationSyntax field = FieldDeclaration(
-        VariableDeclaration(IdentifierName(baseClass.BaseClass.FullName))
-          .AddVariables(VariableDeclarator(i is not null ? $"Base{i + 1}" : "Base")))
-      .WithAttributeLists([fieldOffsetAttribute])
-      .WithModifiers(Pub);
-
-    return field;
-  }
-
+  // TODO: move this to another file
   public static string ToCsName(TypeIndex index) => index.SimpleKind switch {
     SimpleTypeKind.None => "__arglist",
     SimpleTypeKind.Void => "void",

@@ -65,8 +65,8 @@ internal static class Program {
 
     outputPath ??= Path.Combine(Directory.GetCurrentDirectory(), "output", namespaceName);
 
-    using SourceGen sourceGen = new(pdbPath, namespaceName);
-    sourceGen.PdbToCSharp(outputPath);
+    using SourceGen sourceGen = new(pdbPath, namespaceName, outputPath);
+    sourceGen.PdbToCSharp();
   }
 
   private static void PrintHelp() {
