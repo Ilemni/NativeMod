@@ -96,10 +96,6 @@ public sealed partial class SourceGen {
           _duplicateCsNames[attempt] = [existing, type];
         }
 
-        if (existingUnique is null != classUnique is null) {
-          ;
-        }
-
         Log.Warn(
           $"Type name '{attempt}' already exists. From {type.GetType().Name}\n" +
           $"       Existing: {existing} ({existing.TypeIndex.ArrayIndex})\n" +

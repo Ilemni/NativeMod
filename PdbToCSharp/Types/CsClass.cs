@@ -171,7 +171,8 @@ public sealed class CsSimplePointerType(SourceGen sourceGen, TypeIndex index, Mo
 }
 
 public sealed class CsPointerType : CsType {
-  public CsPointerType(PointerRecord pointer, SourceGen sourceGen, TypeIndex index, ModifierOptions modifiers) : base(sourceGen, index, modifiers) {
+  public CsPointerType(PointerRecord pointer, SourceGen sourceGen, TypeIndex index, ModifierOptions modifiers) : base(
+    sourceGen, index, modifiers) {
     PointerRecord = pointer;
     if (!pointer.Mode.HasFlag(PointerMode.PointerToMemberFunction)) {
       ElementType = GetOrCreate(sourceGen, pointer.ReferentType, modifiers);
@@ -179,7 +180,7 @@ public sealed class CsPointerType : CsType {
     }
 
     CsStructure container = (CsStructure)SourceGen.CsUdts[pointer.MemberInfo.ContainingType];
-    ElementType = container.InstanceMethods.First(m => m.TypeIndex == pointer.ReferentType);
+    ElementType = container.InstanceMethods.First(m => m.TypeIndex == PointerRecord.ReferentType);
   }
 
   public readonly PointerRecord PointerRecord;
@@ -474,25 +475,32 @@ public sealed class CsUnion(UnionRecord record, TypeIndex index, SourceGen sourc
 
   public override ulong Size => Record.Size;
 
-  public override string ToString() =>
-    NestedTypeRecord is null ? $"union {FullName}" : $"union {FullName} ({SelfName})";
+  public override string ToString() => NestedTypeRecord is null
+    ? $"union {FullName}"
+    : $"union {FullName} ({SelfName})";
 }
 
-public sealed class CsEnum(EnumRecord record, TypeIndex index, SourceGen sourceGen, ModifierOptions modifiers)
-  : CsUdt(index, sourceGen, record, modifiers) {
+public sealed class CsEnum : CsUdt {
+  public CsEnum(EnumRecord record, TypeIndex index, SourceGen sourceGen, ModifierOptions modifiers) : base(index,
+    sourceGen, record, modifiers) {
+    Values = Record.MemberCount > 0
+      ? PdbFile
+        .GetRecord<FieldListRecord>(Record.FieldList).Fields
+        .OfType<EnumeratorRecord>()
+        .Select(e => new CsEnumField(e)).ToArray()
+      : [];
+  }
+
   public override EnumRecord Record => (EnumRecord)base.Record;
   public CsType Underlying => field ??= GetOrCreate(SourceGen, Record.UnderlyingType);
-  public override string ToString() => NestedTypeRecord is null ? $"enum {FullName}" : $"enum {FullName} ({SelfName})";
+  public override string ToString() => NestedTypeRecord is null
+    ? $"enum {FullName}"
+    : $"enum {FullName} ({SelfName})";
 
   public override ulong Size => Underlying.Size;
 
   [DebuggerBrowsable(DebuggerBrowsableState.RootHidden)]
-  public CsEnumField[] Values => Record.MemberCount > 0
-    ? PdbFile
-      .GetRecord<FieldListRecord>(Record.FieldList).Fields
-      .OfType<EnumeratorRecord>()
-      .Select(e => new CsEnumField(e)).ToArray()
-    : [];
+  public readonly CsEnumField[] Values;
 }
 
 public sealed class CsEnumField(EnumeratorRecord record) {
@@ -512,10 +520,20 @@ public sealed class CsArray(ArrayRecord record, TypeIndex index, SourceGen sourc
 
   public override ulong Size => Record.Size;
 
-  public override string ToString() => $"array of {ElementType} [{Count}]";
+  public override string ToString() => $"Array of {ElementType} [{Count}]";
 
   protected override string CreateSelfName() {
-    return $"{ElementType.SelfName}[{Count}]";
+    const string start = "InlineArray_";
+    string end = "";
+    CsType rootElement = this;
+    while (rootElement is CsArray a) {
+      rootElement = a.ElementType;
+      end += '_' + ((int)a.Count).ToString();
+    }
+
+    string elementName = rootElement.FullName.SanitizeName(true, true);
+    string result = start + elementName + end;
+    return result;
   }
 }
 
@@ -610,7 +628,10 @@ public sealed class CsConstantField(CsStructure container, StaticDataMemberRecor
   }
 }
 
-public sealed class CsThreadLocalStorageField(CsStructure container, StaticDataMemberRecord record, ThreadLocalDataSymbol threadLocalData)
+public sealed class CsThreadLocalStorageField(
+  CsStructure container,
+  StaticDataMemberRecord record,
+  ThreadLocalDataSymbol threadLocalData)
   : CsStaticField(container, record) {
   public readonly ThreadLocalDataSymbol ThreadLocalData = threadLocalData;
 
@@ -626,14 +647,10 @@ public sealed class CsThreadLocalStorageField(CsStructure container, StaticDataM
   }
 }
 
-public sealed class CsRegularStaticField : CsStaticField {
-  public CsRegularStaticField(CsStructure container, StaticDataMemberRecord record, DataSymbol data) : base(container, record) {
-    Data = data;
-    RelativeVirtualAddress = container.PdbFile.FindRelativeVirtualAddress(data.Segment, data.Offset);
-  }
-
-  public readonly DataSymbol Data;
-  public readonly ulong RelativeVirtualAddress;
+public sealed class CsRegularStaticField(CsStructure container, StaticDataMemberRecord record, DataSymbol data)
+  : CsStaticField(container, record) {
+  public readonly DataSymbol Data = data;
+  public readonly ulong RelativeVirtualAddress = container.PdbFile.FindRelativeVirtualAddress(data.Segment, data.Offset);
 
 
   public override string ToString() {
@@ -653,7 +670,8 @@ public sealed class CsInstanceMethod : CsType {
   public static readonly List<string> HasFuncNames = [];
   public static readonly List<string> MissingFuncName = [];
 #endif
-  public CsInstanceMethod(CsStructure container, OneMethodRecord record, string? overloadedName = null) : base(container.SourceGen, record.Type, ModifierOptions.None) {
+  public CsInstanceMethod(CsStructure container, OneMethodRecord record, string? overloadedName = null) : base(
+    container.SourceGen, record.Type, ModifierOptions.None) {
     Container = container;
     Record = record;
     Name = record.Name.String ?? overloadedName!;

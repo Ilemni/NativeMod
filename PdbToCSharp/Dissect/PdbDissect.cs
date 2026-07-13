@@ -538,10 +538,6 @@ internal static class PdbDissect {
       .ToArray();
 
     foreach (ProcedureReferenceSymbol procRef in procRefs) {
-      if (procRef.Name.String.StartsWith("Shii_boss")) {
-        ;
-      }
-
       procWriter.WriteLine(
         $"{procRef.Offset:X8}:{procRef.Module:X6} | " +
         $"Procedure Name=\"{procRef.Name.String}\" | " +

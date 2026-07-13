@@ -1,6 +1,5 @@
 ﻿using System.Diagnostics;
 using System.Diagnostics.CodeAnalysis;
-using System.Runtime.InteropServices;
 using Microsoft.CodeAnalysis.CSharp;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
 using PdbToCSharp.Dissect;
@@ -48,9 +47,6 @@ public sealed partial class SourceGen : IDisposable {
   internal TypeRecord[] Records = null!;
   private (TagRecord tag, TypeIndex index)[] _tagRecords = null!;
 
-  private readonly Dictionary<string, Dictionary<string, CsUdt>> _addedClassesByNamespace = [];
-  private readonly Dictionary<string, Dictionary<string, CsEnum>> _addedEnumsByNamespace = [];
-
   /// Types which only have a forward reference.
   private readonly HashSet<string> _missingTypes = [];
 
@@ -76,46 +72,49 @@ public sealed partial class SourceGen : IDisposable {
     int total = CsUdts.Values.Count(u => u.Parent is null);
     int i = 0;
     HashSet<TypeIndex> created = [];
+    Dictionary<string, Dictionary<string, CsUdt>> addedClassesByNamespace = [];
+    Dictionary<string, Dictionary<string, CsEnum>> addedEnumsByNamespace = [];
+
     using ProgressBar progressBar = new();
     foreach (CsUdt udt in CsUdts.Values.Where(u => u.Parent is null)) {
       progressBar.Report((double)++i / total);
       if (!created.Add(udt.TypeIndex)) {
-        // TODO: allow declaration of empty forward references
-        // Was a forward reference
+        // Was a forward reference that has a body defined in the pdb; both entries are identical
         continue;
       }
 
-      string name = udt.FullName;
       if (udt is CsEnum csEnum) {
-        if (!_addedEnumsByNamespace.TryGetValue(name, out var nsEDict)) {
-          nsEDict = [];
-          _addedEnumsByNamespace[name] = nsEDict;
+        if (CheckDuplicateName(csEnum, addedEnumsByNamespace)) {
+          ref FsNamespaceDecl enumNs = ref _ns.GetMatching(udt);
+          enumNs = enumNs.AddMember(CreateEnum(csEnum));
         }
-        else {
-          if (!nsEDict.TryAdd(name, csEnum)) {
-            // Log.Warn($"Duplicate enum name \"{name}\" in namespace \"{csEnum.Namespace}\".");
-            continue;
-          }
-        }
-
-        ref FsNamespaceDecl enumNs = ref _ns.EnumNs;
-        enumNs = enumNs.AddMember(CreateEnum(csEnum));
-        continue;
       }
 
-      if (!_addedClassesByNamespace.TryGetValue(name, out var nsDict)) {
+      else if (CheckDuplicateName(udt, addedClassesByNamespace)) {
+        ref FsNamespaceDecl nsToAdd = ref _ns.GetMatching(udt);
+        MemberDeclarationSyntax member = CreateType(udt);
+        nsToAdd = nsToAdd.AddMember(member);
+      }
+    }
+
+    return;
+
+    static bool CheckDuplicateName<T>(T udt, Dictionary<string, Dictionary<string, T>> dict) where T : CsUdt {
+      string fullName = udt.Namespace is { } ns
+        ? ns + '.' + udt.FullName
+        : udt.FullName;
+      if (!dict.TryGetValue(fullName, out var nsDict)) {
         nsDict = [];
-        _addedClassesByNamespace[name] = nsDict;
+        dict[fullName] = nsDict;
       }
       else {
-        if (!nsDict.TryAdd(name, udt)) {
-          // Log.Warn($"Duplicate class name \"{name}\" in namespace \"{udt.Namespace}\".");
-          continue;
+        if (!nsDict.TryAdd(fullName, udt)) {
+          // Log.Warn($"Duplicate class name \"{udt.FullName}\" in namespace \"{udt.Namespace}\".");
+          return false;
         }
       }
 
-      ref FsNamespaceDecl nsToAdd = ref _ns.GetMatching(udt);
-      CreateTypeForNs(udt, ref nsToAdd);
+      return true;
     }
   }
 
@@ -180,13 +179,6 @@ public sealed partial class SourceGen : IDisposable {
       .ToArray();
   }
 
-  private void CreateTypeForNs(CsUdt udt, ref FsNamespaceDecl ns) {
-    string name = udt.SelfName;
-    MemberDeclarationSyntax member = CreateType(udt);
-    ns = ns.AddMember(member);
-  }
-
-
   private void PreProcess() {
     // Lets us get argument names for the methods, which are not available in the TPI stream.
     Log.Step("Loading procedure info");
@@ -208,11 +200,12 @@ public sealed partial class SourceGen : IDisposable {
     Parallel.ForEach(_tagRecords.Index().Where(r => r.Item.tag.IsForwardReference), iter => {
       (TagRecord tag, TypeIndex i) = iter.Item;
 
-      ResolveForwardReference(tag, iter.Index, out TagRecord? resolved, out TypeIndex resolvedIndex);
-      CsType csType = resolved is null ? CsType.GetOrCreate(this, i) : CsTypes[resolvedIndex.ArrayIndex]!;
-      CsTypes[i.ArrayIndex] = csType;
+      CsTypes[i.ArrayIndex] = ResolveForwardReference(tag, iter.Index, out _, out TypeIndex rIndex)
+        ? CsTypes[rIndex.ArrayIndex]!
+        : CsType.GetOrCreate(this, i);
     });
 
+    // Cannot use Paralle.ForEach to assign to dictionary
     foreach ((int i, CsUdt udt) in CsTypes.Index().Where(r => r.Item is CsUdt).Select(r => (r.Index, (CsUdt)r.Item!))) {
       CsUdts[udt.TypeIndex] = udt;
       if (i != udt.TypeIndex.ArrayIndex) {
@@ -220,14 +213,14 @@ public sealed partial class SourceGen : IDisposable {
       }
     }
 
-    Log.Step("Finding parents for all nested types");
+    Log.Step("Setting parents for all nested types");
     var nestedIter = CsUdts.Values
       .Where(p => p.Record.Options.HasFlag(ClassOptions.ContainsNestedClass))
       .Select(p => (parent: p, p.Record.GetFields(Pdb).OfType<NestedTypeRecord>()));
 
     Parallel.ForEach(nestedIter, iter => {
       foreach (NestedTypeRecord nested in iter.Item2) {
-        if (CsUdts.TryGetValue(nested.Type, out CsUdt? nestedCs)) {
+        if (CsUdts.TryGetValue(nested.Type, out CsUdt? nestedCs) && nestedCs.Record.IsNested) {
           nestedCs.SetParent(iter.parent, nested);
         }
       }
@@ -236,12 +229,19 @@ public sealed partial class SourceGen : IDisposable {
     // Force loading of lazy-loaded props
     foreach (CsUdt csUdt in CsUdts.Values) {
       _ = csUdt.FullName;
+      if (csUdt is CsEnum csEnum) {
+        _ = csEnum.Values;
+      }
+
       if (csUdt is CsStructure csStruct) {
         _ = csStruct.BaseClasses;
         _ = csStruct.InstanceMethods;
-        var fields = csStruct.InstanceFields;
-        foreach (CsInstanceField f in fields) {
+        _ = csStruct.StaticFields;
+        foreach (CsInstanceField f in csStruct.InstanceFields) {
           _ = f.FieldType;
+        }
+        foreach (CsInstanceMethod m in csStruct.InstanceMethods) {
+          _ = m.ParameterTypes;
         }
       }
     }
@@ -268,7 +268,7 @@ public sealed partial class SourceGen : IDisposable {
     return resolved is not null;
   }
 
-  private bool AllowedName(string name) {
+  private static bool AllowedName(string name) {
     return !name.Contains("unnamed struct at") &&
       !name.Contains("`lambda at") && !name.Contains("<lambda_");
   }
