@@ -68,6 +68,16 @@ internal sealed class CsWriters(string outputPath, string namespaceName) : IDisp
   }
 
   public void Dispose() {
+    _classNs?.Flush();
+    _arrayNs?.Flush();
+    _enumNs?.Flush();
+    _unionNs?.Flush();
+    _templateClassNs?.Flush();
+    _templateUnionNs?.Flush();
+    foreach (Writer writer in _namespaceMap.Values) {
+      writer.Flush();
+    }
+
     _classNs?.Dispose();
     _arrayNs?.Dispose();
     _enumNs?.Dispose();
