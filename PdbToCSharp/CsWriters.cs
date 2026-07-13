@@ -5,7 +5,7 @@ namespace PdbToCSharp;
 
 using Writer = IndentedTextWriter;
 
-internal sealed class Namespaces(string outputPath, string namespaceName) : IDisposable {
+internal sealed class CsWriters(string outputPath, string namespaceName) : IDisposable {
   private readonly Dictionary<string, Writer> _namespaceMap = [];
   private Writer? _classNs;
   private Writer? _enumNs;

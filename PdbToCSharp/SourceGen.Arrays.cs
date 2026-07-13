@@ -26,7 +26,7 @@ public sealed partial class SourceGen {
         continue;
       }
 
-      IndentedTextWriter writer = _ns.InlineArrayWriter;
+      IndentedTextWriter writer = _writers.InlineArrayWriter;
       // XmlDoc type info
       writer.Write("// Inline array: ");
       writer.Write(elementType.ToString());

@@ -14,7 +14,7 @@ public sealed partial class SourceGen : IDisposable {
   public SourceGen(string pdbPath, string namespaceName, string outputPath) {
     Namespace = namespaceName;
     Pdb = new PdbFileReader(pdbPath);
-    _ns = new Namespaces(outputPath, namespaceName);
+    _writers = new CsWriters(outputPath, namespaceName);
     CsTypes = new CsType[Pdb.PdbFile.TpiStream.TypeRecordCount];
 
     MemoryAddressFieldName = namespaceName.Replace(".", "") + "MemoryAddress";
@@ -48,7 +48,7 @@ public sealed partial class SourceGen : IDisposable {
 
   internal readonly PdbFileReader Pdb;
   private PdbFile PdbFile => Pdb.PdbFile;
-  private readonly Namespaces _ns;
+  private readonly CsWriters _writers;
 
   internal TypeRecord[] Records = null!;
   private (TagRecord tag, TypeIndex index)[] _tagRecords = null!;
@@ -87,7 +87,7 @@ public sealed partial class SourceGen : IDisposable {
       switch (udt) {
         case CsEnum csEnum: {
           if (CheckDuplicateName(csEnum, addedEnumsByNamespace)) {
-            IndentedTextWriter writer = _ns.GetMatching(csEnum);
+            IndentedTextWriter writer = _writers.GetMatching(csEnum);
             WriteEnum(csEnum, writer);
           }
 
@@ -95,7 +95,7 @@ public sealed partial class SourceGen : IDisposable {
         }
         case CsStructure csStructure: {
           if (CheckDuplicateName(csStructure, addedClassesByNamespace)) {
-            IndentedTextWriter writer = _ns.GetMatching(csStructure);
+            IndentedTextWriter writer = _writers.GetMatching(csStructure);
             WriteStruct(csStructure, writer);
           }
 
@@ -491,6 +491,6 @@ public sealed partial class SourceGen : IDisposable {
 
   public void Dispose() {
     Pdb.Dispose();
-    _ns.Dispose();
+    _writers.Dispose();
   }
 }
