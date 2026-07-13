@@ -1,5 +1,6 @@
 ﻿using System.CodeDom.Compiler;
 using System.Reflection;
+using System.Runtime.CompilerServices;
 
 namespace PdbToCSharp;
 
@@ -29,6 +30,10 @@ public static class IndentedTextWriterExtensions {
     }
     public void WriteXmlDocTextLine(string text) {
       writer.WriteLine(System.Security.SecurityElement.Escape(text));
+    }
+
+    public void WriteXmlDocLinebreak() {
+      writer.Write("<br/>");
     }
   }
 }

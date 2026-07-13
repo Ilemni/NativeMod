@@ -1,6 +1,5 @@
 ﻿using System.CodeDom.Compiler;
 using System.Globalization;
-using System.Reflection;
 using PdbToCSharp.Dissect;
 using PdbToCSharp.ThirdParty;
 using PdbToCSharp.Types;
@@ -220,9 +219,10 @@ public sealed partial class SourceGen : IDisposable {
     // Write XML doc
     writer.Write("/// Struct type: ");
     writer.WriteXmlDocText(csStruct.Record.Name.String);
-    writer.WriteXmlDocText(" (");
+    writer.WriteXmlDocLinebreak();
+    writer.Write("UniqueName: ");
     writer.WriteXmlDocText(csStruct.Record.UniqueName.String);
-    writer.WriteXmlDocTextLine(")");
+    writer.WriteLine();
 
     // Write GeneratedCode attribute
     writer.WriteGeneratedCodeAttribute();
@@ -258,9 +258,10 @@ public sealed partial class SourceGen : IDisposable {
 
         writer.Write("/// Base class: ");
         writer.WriteXmlDocText(baseClass.BaseClass.Record.Name.String);
-        writer.WriteXmlDocText(" (TypeIndex ");
+        writer.WriteXmlDocLinebreak();
+        writer.Write("TypeIndex: ");
         writer.WriteXmlDocText(baseClass.BaseClass.TypeIndex.ToString());
-        writer.WriteXmlDocTextLine(")");
+        writer.WriteLine();
 
         // FieldOffset attribute
         prependGlobal = false;
@@ -292,9 +293,10 @@ public sealed partial class SourceGen : IDisposable {
         writer.Write("/// Field: ");
         if (csStruct.PdbFile.TryGetRecord(field.FieldType.TypeIndex) is { } fieldTypeRecord) {
           writer.WriteXmlDocText(fieldTypeRecord.ToString(csStruct.PdbFile));
-          writer.WriteXmlDocText(" (TypeIndex ");
+          writer.WriteXmlDocLinebreak();
+          writer.Write("TypeIndex ");
           writer.WriteXmlDocText(field.FieldType.TypeIndex.ToString());
-          writer.WriteXmlDocTextLine(")");
+          writer.WriteLine();
         }
         else {
           writer.WriteXmlDocTextLine(field.FieldType.TypeIndex.ToString());
@@ -353,9 +355,10 @@ public sealed partial class SourceGen : IDisposable {
         writer.Write("/// Field: ");
         if (csStruct.PdbFile.TryGetRecord(field.FieldType.TypeIndex) is { } fieldTypeRecord) {
           writer.WriteXmlDocText(fieldTypeRecord.ToString(csStruct.PdbFile));
-          writer.WriteXmlDocText(" (TypeIndex ");
+          writer.WriteXmlDocLinebreak();
+          writer.Write("TypeIndex: ");
           writer.WriteXmlDocText(field.FieldType.TypeIndex.ToString());
-          writer.WriteXmlDocTextLine(")");
+          writer.WriteLine();
         }
         else {
           writer.WriteXmlDocTextLine(field.FieldType.TypeIndex.ToString());
@@ -445,9 +448,10 @@ public sealed partial class SourceGen : IDisposable {
     // Write XML doc
     writer.Write("/// Enum type: ");
     writer.WriteXmlDocText(csEnum.Record.Name.String);
-    writer.WriteXmlDocText(" (");
+    writer.WriteXmlDocLinebreak();
+    writer.Write("UniqueName: ");
     writer.WriteXmlDocText(csEnum.Record.UniqueName.String);
-    writer.WriteXmlDocTextLine(")");
+    writer.WriteLine();
 
     // Write GeneratedCode attribute
     writer.WriteGeneratedCodeAttribute();
