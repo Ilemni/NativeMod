@@ -65,6 +65,8 @@ internal static class Program {
 
     outputPath ??= Path.Combine(Directory.GetCurrentDirectory(), "output", namespaceName);
 
+    // temp
+    namespaceName = "MioGame";
     using SourceGen sourceGen = new(pdbPath, namespaceName, outputPath);
     sourceGen.PdbToCSharp();
   }
