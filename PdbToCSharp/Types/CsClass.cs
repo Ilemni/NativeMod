@@ -1,4 +1,5 @@
 ﻿using System.Diagnostics;
+using System.Diagnostics.CodeAnalysis;
 using System.Runtime.CompilerServices;
 using SharpPdb.Native.Types;
 using SharpPdb.Windows;
@@ -21,7 +22,12 @@ public abstract class CsType(SourceGen sourceGen, TypeIndex index, ModifierOptio
   public abstract ulong Size { get; }
 
   public string SelfName => field ??= ValidateName(CreateSelfName(), true);
-  public string FullName => field ??= ValidateName(CreateFullName(), false);
+
+  [AllowNull]
+  public string FullName {
+    get => field ??= ValidateName(CreateFullName(), false);
+    protected set;
+  }
 
   public virtual string FullyQualifiedName => SelfName;
 
@@ -33,7 +39,7 @@ public abstract class CsType(SourceGen sourceGen, TypeIndex index, ModifierOptio
   public sealed override int GetHashCode() => (int)TypeIndex.Index;
 
   private string ValidateName(string name, bool isSelfName) {
-    if (this is CsFunctionType or CsPointerType or CsArray) {
+    if (this is CsFunctionType or CsPointerType or CsSimplePointerType or CsArray) {
       // Functions, pointers, and arrays should pass by default. Any inner arguments should throw.
       return name;
     }
@@ -135,17 +141,20 @@ public abstract class CsType(SourceGen sourceGen, TypeIndex index, ModifierOptio
 
   public override string ToString() => FullName;
 
-  protected string QualifyWithGlobal() =>
-    "global::" +
-    SourceGen.Namespace + '.' +
-    (Namespace is { } ns ? ns + '.' : "") +
-    FullName;
+  protected string QualifyWithGlobal() {
+    string fullName = FullName;
+    string result = "global::" +
+      SourceGen.Namespace + '.' +
+      (Namespace is { } ns ? ns + '.' : "") +
+      fullName;
+    return result;
+  }
 }
 
 public sealed class CsSimpleType(SourceGen sourceGen, TypeIndex index, ModifierOptions modifiers)
   : CsType(sourceGen, index, modifiers) {
   public override string ToString() => $"{FullName} ({TypeIndex.SimpleKind})";
-  protected override string CreateSelfName() => SourceGen.ToCsName(TypeIndex);
+  protected override string CreateSelfName() => ToCsName(TypeIndex);
 
   // TODO: add global:: if there is a namespace (System.Half, etc)
   public override string FullyQualifiedName => SelfName;
@@ -160,12 +169,65 @@ public sealed class CsSimpleType(SourceGen sourceGen, TypeIndex index, ModifierO
   }
 
   private ulong? _size;
+
+
+  public static string ToCsName(TypeIndex index) => index.SimpleKind switch {
+    SimpleTypeKind.None => "__arglist",
+    SimpleTypeKind.Void => "void",
+    SimpleTypeKind.NotTranslated => throw new NotSupportedException("NotTranslated type kind is not supported"),
+    SimpleTypeKind.HResult => nameof(CppHResult),
+    SimpleTypeKind.SignedCharacter => nameof(CppSignedChar),
+    SimpleTypeKind.UnsignedCharacter => nameof(CppUnsignedChar),
+    SimpleTypeKind.NarrowCharacter => nameof(CppChar),
+    SimpleTypeKind.WideCharacter => nameof(CppWideChar),
+    SimpleTypeKind.Character16 => nameof(CppChar16),
+    SimpleTypeKind.Character32 => nameof(CppChar32),
+    SimpleTypeKind.SByte => nameof(CppInt8),
+    SimpleTypeKind.Byte => nameof(CppUInt8),
+    SimpleTypeKind.Int16Short => nameof(CppInt16Short),
+    SimpleTypeKind.UInt16Short => nameof(CppUInt16Short),
+    SimpleTypeKind.Int16 => nameof(CppInt16),
+    SimpleTypeKind.UInt16 => nameof(CppUInt16),
+    SimpleTypeKind.Int32Long => nameof(CppInt32Long),
+    SimpleTypeKind.UInt32Long => nameof(CppUInt32Long),
+    SimpleTypeKind.Int32 => nameof(CppInt32),
+    SimpleTypeKind.UInt32 => nameof(CppUInt32),
+    SimpleTypeKind.Int64Quad => nameof(CppInt64Quad),
+    SimpleTypeKind.UInt64Quad => nameof(CppUInt64Quad),
+    SimpleTypeKind.Int64 => nameof(CppInt64),
+    SimpleTypeKind.UInt64 => nameof(CppUInt64),
+    SimpleTypeKind.Int128Oct => nameof(CppInt128Oct),
+    SimpleTypeKind.UInt128Oct => nameof(CppUInt128Oct),
+    SimpleTypeKind.UInt128 => nameof(CppUInt128),
+    SimpleTypeKind.Int128 => nameof(CppInt128),
+    SimpleTypeKind.Float16 => "global::System.Single",
+    SimpleTypeKind.Float32 => "float",
+    SimpleTypeKind.Float32PartialPrecision => nameof(CppFloat32PartialPrecision),
+    SimpleTypeKind.Float48 => throw new NotSupportedException("Float48 type kind is not supported"),
+    SimpleTypeKind.Float64 => "double",
+    SimpleTypeKind.Float80 => throw new NotSupportedException("Float80 type kind is not supported"),
+    SimpleTypeKind.Float128 => throw new NotSupportedException("Float128 type kind is not supported"),
+    SimpleTypeKind.Complex32 => throw new NotSupportedException("Complex32 type kind is not supported"),
+    SimpleTypeKind.Complex64 => throw new NotSupportedException("Complex64 type kind is not supported"),
+    SimpleTypeKind.Complex80 => throw new NotSupportedException("Complex80 type kind is not supported"),
+    SimpleTypeKind.Complex128 => "global::System.Numerics.Complex",
+    SimpleTypeKind.Boolean8 => "bool",
+    SimpleTypeKind.Boolean16 => nameof(CppBoolean16),
+    SimpleTypeKind.Boolean32 => nameof(CppBoolean32),
+    SimpleTypeKind.Boolean64 => nameof(CppBoolean64),
+    SimpleTypeKind.Complex16 => throw new NotSupportedException("Complex16 type kind is not supported"),
+    SimpleTypeKind.Complex32PartialPrecision => throw new NotSupportedException(
+      "Complex32PartialPrecision type kind is not supported"),
+    SimpleTypeKind.Complex48 => throw new NotSupportedException("Complex48 type kind is not supported"),
+    SimpleTypeKind.Boolean128 => nameof(CppBoolean128),
+    _ => throw new ArgumentOutOfRangeException(nameof(index))
+  };
 }
 
 public sealed class CsSimplePointerType(SourceGen sourceGen, TypeIndex index, ModifierOptions modifiers)
   : CsType(sourceGen, index, modifiers) {
   public override string ToString() => $"{FullName}* ({TypeIndex.SimpleKind})";
-  protected override string CreateSelfName() => SourceGen.ToCsName(TypeIndex);
+  protected override string CreateSelfName() => CsSimpleType.ToCsName(TypeIndex) + '*';
 
   public override ulong Size {
     get {
@@ -195,6 +257,30 @@ public sealed class CsPointerType : CsType {
   public readonly PointerRecord PointerRecord;
   public readonly CsType ElementType;
 
+  public CsType InnerElement {
+    get {
+      CsType current = ElementType;
+      while (current is CsPointerType pointer) {
+        current = pointer.ElementType;
+      }
+
+      return current;
+    }
+  }
+
+  public int Depth {
+    get {
+      int depth = 1;
+      CsType current = ElementType;
+      while (current is CsPointerType pointer) {
+        depth++;
+        current = pointer.ElementType;
+      }
+
+      return depth;
+    }
+  }
+
   // TODO: use correct number of '*' in name
   public override string? Namespace => ElementType.Namespace;
   public override string FullyQualifiedName => ElementType.FullyQualifiedName + "*";
@@ -215,26 +301,35 @@ public abstract class CsUdt(TypeIndex index, SourceGen sourceGen, TagRecord reco
   public virtual TagRecord Record { get; } = record;
 
   public override string? Namespace {
-    get => field ??= Parent?.Namespace;
+    get => Parent is null ? field : Parent.Namespace;
     set;
   }
 
-  public override string FullyQualifiedName => field ??= QualifyWithGlobal();
+  public override string FullyQualifiedName => _fullyQualifiedName ??= QualifyWithGlobal();
+  private string? _fullyQualifiedName;
 
-  public CsUdt? Parent { get; private set; }
-  public NestedTypeRecord? NestedTypeRecord { get; private set; }
+  public CsStructure? Parent { get; private set; }
+  public NestedTypeRecord? ThisAsNested { get; private set; }
 
-  public void SetParent(CsUdt udt, NestedTypeRecord record) {
-    Parent = udt;
-    NestedTypeRecord = record;
+  public void SetParent(CsStructure parent, NestedTypeRecord? record) {
+    Parent = parent;
+    // Template types will always have their "T" named "Type".
+    // We want to maintain the original name.
+    if (!parent.Record.Name.String.Contains('<') || record?.Name.String != "Type") {
+      ThisAsNested = record;
+    }
+
+    // Invalidate names
+    FullName = null;
+    _fullyQualifiedName = null;
   }
 
   protected override string CreateFullName() => Parent is null ? SelfName : $"{Parent.FullName}.{SelfName}";
 
   protected override string CreateSelfName() {
     string recordName = Record.Name.String;
-    string str = NestedTypeRecord?.Name.String ?? recordName;
-    if (NestedTypeRecord is null) {
+    string str = ThisAsNested?.Name.String ?? recordName;
+    if (ThisAsNested is null) {
       if ((Record.Options & ClassOptions.Scoped) != 0) {
         return SanitizeName(str);
       }
@@ -250,18 +345,22 @@ public abstract class CsUdt(TypeIndex index, SourceGen sourceGen, TagRecord reco
         idx = str.AsSpan()[..preGenericScope].LastIndexOf("::", StringComparison.Ordinal);
       }
 
-      str = recordName[(idx + 2)..];
+      if (idx != -1) {
+        str = recordName[(idx + 2)..];
+      }
+
       Namespace = idx != -1
         ? recordName[..idx]
           .Replace("::", ".")
           .Replace("`anonymous-namespace'", "_")
           .Replace("`anonymous namespace'", "_")
+          .KeywordToVerbatim(true)
         : null;
 
       return SanitizeName(str);
     }
 
-    if (!string.IsNullOrWhiteSpace(NestedTypeRecord.Name.String)) {
+    if (!string.IsNullOrWhiteSpace(ThisAsNested.Name.String)) {
       return SanitizeName(str);
     }
 
@@ -327,15 +426,30 @@ public abstract class CsUdt(TypeIndex index, SourceGen sourceGen, TagRecord reco
   }
 }
 
-public abstract class CsStructure(TagRecord record, TypeIndex index, SourceGen sourceGen, ModifierOptions modifiers)
-  : CsUdt(index, sourceGen, record, modifiers) {
-  public VirtualFunctionPointerRecord? VfPtr =>
-    AllFields.Count == 0 ? null : AllFields[0] as VirtualFunctionPointerRecord;
+public abstract class CsStructure : CsUdt {
+  protected CsStructure(TagRecord record, TypeIndex index, SourceGen sourceGen, ModifierOptions modifiers) : base(index,
+    sourceGen, record, modifiers) {
+    AllFields = PdbFile.TryGetRecord<FieldListRecord>(record.FieldList)?.Fields ?? [];
+    VfPtr = AllFields.Count == 0 ? null : AllFields.OfType<VirtualFunctionPointerRecord>().FirstOrDefault();
+    if (VfPtr is { } vfPtr) {
+      PointerRecord pointer = PdbFile.GetRecord<PointerRecord>(vfPtr.Type);
+      VfTable = PdbFile.GetRecord<VirtualFunctionTableShapeRecord>(pointer.ReferentType);
+    }
+  }
 
-  public VirtualFunctionTableShapeRecord? VfTable => field ??= GetVfTable();
-  public IReadOnlyList<TypeRecord> AllFields => field ??= GetAllFields();
+  public readonly IReadOnlyList<TypeRecord> AllFields;
+  public readonly VirtualFunctionPointerRecord? VfPtr;
+  public readonly VirtualFunctionTableShapeRecord? VfTable;
+
+  public ulong VfAddress =>
+    _vfAddress ??= SourceGen.VTableAddresses.TryGetValue(FullName, out ulong address) ? address : 0;
+
+  private ulong? _vfAddress;
+
+  // Always lazy load fields/props with CsType members
+  public readonly List<CsStructure> DerivedTypes = [];
   public CsBaseClass[] BaseClasses => field ??= GetBaseClasses();
-  public CsStructure[] NestedClasses => field ??= GetNestedClasses();
+  public HashSet<CsUdt> NestedClasses => field ??= GetNestedTypes();
 
   public CsInstanceField[] InstanceFields => field ??= GetInstanceFields();
   public CsInstanceMethod[] InstanceMethods => field ??= GetInstanceMethods();
@@ -346,22 +460,19 @@ public abstract class CsStructure(TagRecord record, TypeIndex index, SourceGen s
     var result = new CsBaseClass[count];
     foreach ((int i, BaseClassRecord baseClass) in AllFields.OfType<BaseClassRecord>().Index()) {
       result[i] = new CsBaseClass(this, baseClass);
+      result[i].BaseType.DerivedTypes.Add(this);
     }
 
     return result;
   }
 
-  private CsStructure[] GetNestedClasses() {
+  private HashSet<CsUdt> GetNestedTypes() {
     return AllFields.OfType<NestedTypeRecord>()
       .Where(n => !n.Type.IsSimple)
       .Select(n => SourceGen.CsTypes[n.Type.ArrayIndex])
-      .OfType<CsStructure>()
-      .Where(c => c.Parent == this)
-      .ToArray();
-  }
-
-  private IReadOnlyList<TypeRecord> GetAllFields() {
-    return PdbFile.TryGetRecord<FieldListRecord>(Record.FieldList)?.Fields ?? [];
+      .OfType<CsUdt>()
+      .Where(c => c.Parent?.Record.UniqueName.String == Record.UniqueName.String)
+      .ToHashSet();
   }
 
   private CsInstanceField[] GetInstanceFields() {
@@ -389,9 +500,10 @@ public abstract class CsStructure(TagRecord record, TypeIndex index, SourceGen s
           result[i++] = new CsInstanceMethod(this, oneMethod);
           break;
         case OverloadedMethodRecord overloadedMethod:
+          int overloadId = 0;
           foreach (OneMethodRecord overload in overloadedMethod.MethodList
                      .As<MethodOverloadListRecord>(PdbFile).Methods) {
-            result[i++] = new CsInstanceMethod(this, overload, overloadedMethod.Name.String);
+            result[i++] = new CsInstanceMethod(this, overload, overloadedMethod.Name.String, ++overloadId);
           }
 
           break;
@@ -463,13 +575,24 @@ public abstract class CsStructure(TagRecord record, TypeIndex index, SourceGen s
     return fields;
   }
 
-  private VirtualFunctionTableShapeRecord? GetVfTable() {
-    PointerRecord? pointer = VfPtr is null ? null : PdbFile.GetRecord<PointerRecord>(VfPtr.Type);
-    if (pointer is null) {
-      return null;
+  public VirtualFunctionTableShapeRecord? FindVfTable(out CsStructure? holder) {
+    if (VfTable is not null) {
+      holder = this;
+      return VfTable;
     }
 
-    return PdbFile.GetRecord<VirtualFunctionTableShapeRecord>(pointer.ReferentType);
+    CsStructure? current = this;
+    while (current is not null) {
+      if (current.VfTable is not null) {
+        holder = current;
+        return current.VfTable;
+      }
+
+      current = current.BaseClasses.FirstOrDefault()?.BaseType;
+    }
+
+    holder = null;
+    return null;
   }
 }
 
@@ -479,7 +602,7 @@ public sealed class CsStruct(ClassRecord record, TypeIndex index, SourceGen sour
 
   public override ulong Size => Record.Size;
 
-  public override string ToString() => NestedTypeRecord is null
+  public override string ToString() => Parent is null
     ? $"struct {FullName}"
     : $"struct {FullName} ({SelfName})";
 }
@@ -490,7 +613,7 @@ public sealed class CsUnion(UnionRecord record, TypeIndex index, SourceGen sourc
 
   public override ulong Size => Record.Size;
 
-  public override string ToString() => NestedTypeRecord is null
+  public override string ToString() => Parent is null
     ? $"union {FullName}"
     : $"union {FullName} ({SelfName})";
 }
@@ -509,7 +632,7 @@ public sealed class CsEnum : CsUdt {
   public override EnumRecord Record => (EnumRecord)base.Record;
   public CsType Underlying => field ??= GetOrCreate(SourceGen, Record.UnderlyingType);
 
-  public override string ToString() => NestedTypeRecord is null
+  public override string ToString() => Parent is null
     ? $"enum {FullName}"
     : $"enum {FullName} ({SelfName})";
 
@@ -638,27 +761,8 @@ public sealed class CsConstantField : CsStaticField {
 
     string symName = symbol.Name.String;
     int index = symName.LastIndexOf("::", StringComparison.Ordinal);
-    Name = index != -1 ? symName[(index + 2)..] : symName;
-
-#if DEBUG
-    if (!types.TryGetValue(FieldType, out var set)) {
-      set = [symbol.Value.GetType()];
-      types[FieldType] = set;
-    }
-    else {
-      set.Add(symbol.Value.GetType());
-    }
-
-    if (FieldType.SelfName == "float") {
-      floatConstants.Add((uint)symbol.Value);
-    }
-#endif
+    Name = (index != -1 ? symName[(index + 2)..] : symName).KeywordToVerbatim();
   }
-
-#if DEBUG
-  public static readonly Dictionary<CsType, HashSet<Type>> types = [];
-  public static readonly HashSet<uint> floatConstants = [];
-#endif
 
   public readonly ConstantSymbol Symbol;
 
@@ -718,34 +822,48 @@ public sealed class CsRegularStaticField(CsStructure container, StaticDataMember
 
 public sealed class CsInstanceMethod : CsType {
 #if DEBUG
-  public static readonly List<string> HasFuncNames = [];
-  public static readonly List<string> MissingFuncName = [];
+  public static readonly List<CsInstanceMethod> HasFuncNames = [];
+  public static readonly List<CsInstanceMethod> MissingFuncName = [];
 #endif
-  public CsInstanceMethod(CsStructure container, OneMethodRecord record, string? overloadedName = null) : base(
-    container.SourceGen, record.Type, ModifierOptions.None) {
+  public CsInstanceMethod(CsStructure container, OneMethodRecord record, string? overloadedName = null,
+    int overloadId = 0) : base(container.SourceGen, record.Type, ModifierOptions.None) {
     Container = container;
     Record = record;
-    Name = record.Name.String ?? overloadedName!;
+    OverloadId = overloadId;
     MethodRecord = Container.PdbFile.GetRecord<MemberFunctionRecord>(record.Type);
+    Name = MethodRecord.Options.HasFlag(FunctionOptions.Constructor)
+      ? "Ctor"
+      : record.Name.String ?? overloadedName!;
+    if (Name.StartsWith('~')) {
+      Name = "Dtor";
+    }
+
+    DelegateFieldName = (OverloadId > 0 ? $"{Name}_{OverloadId}" : Name)
+      .SanitizeName(true, true)
+      .KeywordToVerbatim();
+
     CallingConvention = MethodRecord.CallingConvention;
     IsStatic = MethodRecord.ThisType is
       { IsSimple: true, SimpleMode: SimpleTypeMode.Direct, SimpleKind: SimpleTypeKind.Void };
     // TODO:
-    string lookupName = container.Record.Name.String + "::" + Name;
-    ProcedureInfo = ProcedureHelper.MemberNames.TryGetValue((record.Type, lookupName), out ProcedureInfo pInfo)
+    string className = container.Record.Name.String;
+
+    ProcedureInfo = SourceGen.ProcCache.TryGetValue((className, Name, Record.Type), out ProcedureInfo pInfo)
       ? pInfo
       : null;
 
     if (ProcedureInfo.HasValue) {
-      HasFuncNames.Add(lookupName);
-      Args = pInfo.GoodSize ? pInfo.Args.Select(a => a.Name).ToArray() : [];
+      HasFuncNames.Add(this);
+      Args = pInfo.GoodSize
+        ? pInfo.Args.Select(a => a.Name).ToArray()
+        : Enumerable.Range(0, MethodRecord.ParameterCount).Select(i => $"arg{i + 1}").ToArray();
     }
     else {
-      Args = [];
+      Args = Enumerable.Range(0, MethodRecord.ParameterCount).Select(i => $"arg{i + 1}").ToArray();
       MethodKind methodKind = Record.Attributes.MethodKind;
       if (!methodKind.HasFlag(MethodKind.PureVirtual) &&
           !methodKind.HasFlag(MethodKind.PureIntroducingVirtual)) {
-        MissingFuncName.Add(lookupName);
+        MissingFuncName.Add(this);
       }
     }
 
@@ -763,6 +881,8 @@ public sealed class CsInstanceMethod : CsType {
   public readonly ProcedureInfo? ProcedureInfo;
   public readonly ulong? RelativeVirtualAddress;
   public readonly string[] Args;
+  public readonly int OverloadId;
+  public readonly string DelegateFieldName;
 
   public override ulong Size => 0;
 
@@ -770,6 +890,9 @@ public sealed class CsInstanceMethod : CsType {
 
   public CsType[] ParameterTypes => field ??= MethodRecord.ArgumentList.As<ArgumentListRecord>(Container.PdbFile)
     .Arguments.Select(p => GetOrCreate(Container.SourceGen, p)).ToArray();
+
+  public (CsType type, string name)[] Parameters =>
+    field ??= ParameterTypes.Zip(Args, (type, name) => (type, name)).ToArray();
 
   [DebuggerBrowsable(DebuggerBrowsableState.Never)]
   private string? _toStringValue;
@@ -806,9 +929,45 @@ public sealed class CsInstanceMethod : CsType {
 
     string vfOffset = Record.VFTableOffset != -1 ? $" (vfOffset: {Record.VFTableOffset})" : string.Empty;
 
-    string rva = RelativeVirtualAddress.HasValue ? $" (RVA: 0x{RelativeVirtualAddress.Value:X})" : string.Empty;
+    string rva = RelativeVirtualAddress.HasValue
+      ? $" (RVA: 0x{RelativeVirtualAddress.Value:X})"
+      : " (RVA: unknown)";
 
     return $"{access}{@sealed}{virt}{ret} {Name}({args}){vfOffset}{rva}";
+  }
+
+  public bool Equals(CsInstanceMethod? other) {
+    if (ReferenceEquals(this, other)) return true;
+    if (other is null) return false;
+    if (TypeIndex == other.TypeIndex) return true;
+
+    return
+      Container.TypeIndex == other.Container.TypeIndex &&
+      Name == other.Name &&
+      ParameterTypes.Select(p => p.TypeIndex).SequenceEqual(
+        other.ParameterTypes.Select(p => p.TypeIndex));
+  }
+
+  public class Comparer : IEqualityComparer<CsInstanceMethod> {
+    public static readonly Comparer Instance = new();
+
+    public bool Equals(CsInstanceMethod? x, CsInstanceMethod? y) {
+      if (ReferenceEquals(x, y)) return true;
+      if (x is null || y is null) return false;
+
+      return x.Equals(y);
+    }
+
+    public int GetHashCode(CsInstanceMethod obj) {
+      HashCode hash = new();
+      hash.Add(obj.Container.TypeIndex);
+      hash.Add(obj.Name);
+      foreach (CsType param in obj.ParameterTypes) {
+        hash.Add(param.TypeIndex);
+      }
+
+      return hash.ToHashCode();
+    }
   }
 }
 
@@ -855,9 +1014,9 @@ public sealed class CsBaseClass(CsStructure container, BaseClassRecord record) {
   public readonly CsStructure Container = container;
   public readonly BaseClassRecord Record = record;
 
-  public CsStructure BaseClass => field ??= Container.SourceGen.CsTypes[Record.Type.ArrayIndex] as CsStructure ??
+  public CsStructure BaseType => field ??= Container.SourceGen.CsTypes[Record.Type.ArrayIndex] as CsStructure ??
     throw new InvalidOperationException(
       $"Base class type {Record.Type} is not a structure");
 
-  public override string ToString() => $"base class {BaseClass.FullName} (offset: 0x{Record.Offset:X})";
+  public override string ToString() => $"base class {BaseType.FullName} (offset: 0x{Record.Offset:X})";
 }

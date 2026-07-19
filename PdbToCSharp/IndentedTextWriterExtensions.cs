@@ -1,6 +1,5 @@
 ﻿using System.CodeDom.Compiler;
 using System.Reflection;
-using System.Runtime.CompilerServices;
 
 namespace PdbToCSharp;
 
@@ -15,14 +14,44 @@ public static class IndentedTextWriterExtensions {
       }
     }
 
-    public void WriteGeneratedCodeAttribute(bool prependGlobal = false) {
+    public void WriteGeneratedCodeAttribute(bool prependGlobal = false, bool newLine = true) {
       writer.Write("[");
       writer.WriteIf("global::System.CodeDom.Compiler.", prependGlobal);
       writer.Write("GeneratedCode(\"");
       writer.Write(ThisAssemblyName.Name);
       writer.Write("\", \"");
       writer.Write(Version);
-      writer.WriteLine("\")]");
+      if (newLine) {
+        writer.WriteLine("\")]");
+      } else {
+        writer.Write("\")]");
+      }
+    }
+
+    public void WriteStructLayoutAttribute(ulong size, bool prependGlobal = false, bool newLine = true) {
+      writer.Write("[");
+      writer.WriteIf("global::System.Runtime.InteropServices.", prependGlobal);
+      writer.Write("StructLayout(");
+      writer.WriteIf("global::System.Runtime.InteropServices.", prependGlobal);
+      writer.Write("LayoutKind.Explicit");
+      if (size > 0) {
+        writer.Write(", Size = ");
+        writer.Write(size);
+      }
+
+      if (newLine) {
+        writer.WriteLine(")]");
+      } else {
+        writer.Write(")]");
+      }
+    }
+
+    public void WriteFieldOffsetAttribute(uint offset, bool prependGlobal = false) {
+      writer.Write("[");
+      writer.WriteIf("global::System.Runtime.InteropServices.", prependGlobal);
+      writer.Write("FieldOffset(");
+      writer.Write(offset);
+      writer.Write(")]");
     }
 
     public void WriteXmlDocText(string text) {

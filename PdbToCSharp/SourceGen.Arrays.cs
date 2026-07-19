@@ -9,6 +9,16 @@ public sealed partial class SourceGen {
   /// To support these, we create a <see cref="InlineArrayAttribute"/>
   /// struct for every unique occurence of a fixed-size array type.
   private void WriteInlineArrays() {
+    if (!CsTypes.OfType<CsArray>().Any()) {
+      return;
+    }
+
+    Log.Step("Writing inline array types");
+    IndentedTextWriter writer = _writers.InlineArrayWriter;
+    // We are using pointers in many of the inline arrays
+    // TODO: since they are not supported, should strongly consider switching these to IntPtr or ulong
+    writer.WriteLine("#pragma warning disable CS9184 // Inline array attribute is has unsupported type");
+
     HashSet<string> inlineArrayNames = [];
     // Sort arrays so that we process non-array element types first.
     foreach (CsArray arr in CsTypes.OfType<CsArray>()) {
@@ -26,7 +36,6 @@ public sealed partial class SourceGen {
         continue;
       }
 
-      IndentedTextWriter writer = _writers.InlineArrayWriter;
       // XmlDoc type info
       writer.Write("/// Inline array: ");
       writer.WriteXmlDocText(elementType.ToString());
@@ -40,13 +49,13 @@ public sealed partial class SourceGen {
       writer.WriteGeneratedCodeAttribute();
 
       // InlineArray attribute
-      writer.Write("[InlineArray(");
-      writer.Write(count);
+      writer.Write("[System.Runtime.CompilerServices.InlineArray(");
+      writer.Write(Math.Max(count, 1));
       writer.WriteLine(")]");
 
       // Write struct declaration
       writer.Write("public ");
-      if (elementType is CsPointerType) {
+      if (elementType is CsPointerType or CsSimplePointerType) {
         writer.Write("unsafe ");
       }
       writer.Write("struct ");

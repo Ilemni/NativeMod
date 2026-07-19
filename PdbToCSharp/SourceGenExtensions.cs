@@ -4,7 +4,27 @@ namespace PdbToCSharp;
 
 internal static class SourceGenExtensions {
   extension(string str) {
-    public string KeywordToVerbatim() => ReservedKeywords.Contains(str) || str.StartsWith("__") ? $"@{str}" : str;
+    public string KeywordToVerbatim(bool checkNested = false) {
+      if (ReservedKeywords.Contains(str) || str.StartsWith("__")) {
+        return $"@{str}";
+      }
+
+      if (!checkNested || !str.Contains('.')) {
+        return str;
+      }
+
+      bool anyReserved = false;
+      string[] strs = str.Split('.');
+      for (int i = 0; i < strs.Length; i++) {
+        string subStr = strs[i];
+        if (ReservedKeywords.Contains(subStr) || subStr.StartsWith("__")) {
+          strs[i] = $"@{subStr}";
+          anyReserved = true;
+        }
+      }
+
+      return anyReserved ? string.Join('.', strs) : str;
+    }
 
     public string Sanitize() {
       if (str switch {
@@ -49,7 +69,7 @@ internal static class SourceGenExtensions {
       StringBuilder sb = new();
       bool pendingUnderscore = false;
       foreach (char c in strSpan[..^numPtrsOrRefs]) {
-        bool invalid = " ,<>()[]`'\\-&*$".Contains(c);
+        bool invalid = " ,<>()[]`'\\-&*$?".Contains(c);
         bool isUnderscore = c == '_';
         if (invalid) {
           pendingUnderscore = true;
@@ -76,9 +96,15 @@ internal static class SourceGenExtensions {
 
     public string SanitizeName(bool removePtr = false, bool removeQualifier = false) {
       bool endsInPtr = str.EndsWith('*') || str.EndsWith('&');
+      bool startsWithVerbatim = str.StartsWith('@');
       if (removeQualifier) {
         str = str.Replace('.', '_');
       }
+
+      str = startsWithVerbatim
+        ? '@' + str[1..].Replace('@', '_')
+        : str.Replace('@', '_');
+
       if (!removePtr && endsInPtr) {
         return str[..^1]
             .Replace("~", "Dtor")

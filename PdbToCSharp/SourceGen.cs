@@ -1,22 +1,24 @@
 ﻿using System.CodeDom.Compiler;
-using System.Globalization;
+using System.Runtime.InteropServices;
 using PdbToCSharp.Dissect;
-using PdbToCSharp.ThirdParty;
 using PdbToCSharp.Types;
 using SharpPdb.Native;
 using SharpPdb.Windows;
+using SharpPdb.Windows.DBI;
+using SharpPdb.Windows.SymbolRecords;
 using SharpPdb.Windows.TypeRecords;
 
 namespace PdbToCSharp;
 
 public sealed partial class SourceGen : IDisposable {
   public SourceGen(string pdbPath, string namespaceName, string outputPath) {
-    Namespace = namespaceName;
+    Namespace = namespaceName.KeywordToVerbatim();
     Pdb = new PdbFileReader(pdbPath);
-    _writers = new CsWriters(outputPath, namespaceName);
+    _writers = new CsWriters(this, outputPath, namespaceName);
     CsTypes = new CsType[Pdb.PdbFile.TpiStream.TypeRecordCount];
 
     MemoryAddressFieldName = namespaceName.Replace(".", "") + "MemoryAddress";
+    FunctionAddressFieldName = namespaceName.Replace(".", "") + "FunctionAddress";
   }
 
   /// Root namespace for all generated code.
@@ -24,6 +26,8 @@ public sealed partial class SourceGen : IDisposable {
 
   /// String for how generated code will reference the memory address of the module.
   public readonly string MemoryAddressFieldName;
+
+  public readonly string FunctionAddressFieldName;
 
   internal int UnnamedStructs;
   internal int UnnamedUnions;
@@ -35,7 +39,7 @@ public sealed partial class SourceGen : IDisposable {
 
   // Debug inspect to see which CsTypes are not mapped to records
   private IEnumerable<(CsType? Cs, TypeRecord Pdb)> CsPdbTypePairs =>
-    CsTypes.Select((cs, i) => (cs, Pdb.PdbFile.GetRecord(TypeIndex.FromArrayIndex(i))));
+    Records.Select((record, i) => (CsTypes[i], record));
 
   // Debug inspect to see which CsTypes do get mapped to records
   private IEnumerable<(CsType Cs, TypeRecord Pdb)> CsNotNullPairs =>
@@ -49,33 +53,139 @@ public sealed partial class SourceGen : IDisposable {
   internal TypeRecord[] Records = null!;
   private (TagRecord tag, TypeIndex index)[] _tagRecords = null!;
 
+  public readonly Dictionary<(string Class, string Method, TypeIndex MFuncType), ProcedureInfo> ProcCache = [];
+  public readonly Dictionary<(string Method, TypeIndex MFuncType), ProcedureInfo> GProcCache = [];
+  public readonly Dictionary<string, ulong> VTableAddresses = [];
+
   public void PdbToCSharp() {
     Log.Step("Processing PDB");
+    PreProcess();
     Process();
     Log.Step("Done.");
+  }
 
-#if DEBUG
-    // Inspecting constant fields, as they may be read as a different type
-    var constFieldTypes = CsConstantField.types;
-#endif
+  private void PreProcess() {
+    // Lets us get argument names for the methods, which are not available in the TPI stream.
+    Log.Step("Fixing symbols");
+    ProcedureHelper.ReplaceNullSymbols(PdbFile);
+    Log.Step("Loading procedure info");
+    ProcessProcedureInfo();
+    Log.Step("Loading VTables");
+    ProcessVTables();
+
+    Records = PdbFile.TpiStream.GetTypeRecords();
+
+    Log.Step("Collecting tag records");
+    _tagRecords = Records
+      .Index()
+      .Where(r => r.Item is TagRecord tag && AllowedName(tag.Name.String))
+      .Select(r => ((TagRecord)r.Item, TypeIndex.FromArrayIndex(r.Index)))
+      .ToArray();
+
+    Log.Step("Creating non-forward reference types");
+    Parallel.ForEach(_tagRecords.Where(r => !r.tag.IsForwardReference),
+      iter => { CsType.GetOrCreate(this, iter.index); });
+
+    Log.Step("Resolving forward references");
+    Parallel.ForEach(_tagRecords.Index().Where(r => r.Item.tag.IsForwardReference), iter => {
+      (TagRecord tag, TypeIndex i) = iter.Item;
+
+      CsTypes[i.ArrayIndex] = ResolveForwardReference(tag, iter.Index, out TypeIndex rIndex)
+        ? CsTypes[rIndex.ArrayIndex]!
+        : CsType.GetOrCreate(this, i);
+    });
+
+    // Cannot use Paralle.ForEach to assign to dictionary
+    foreach ((int i, CsUdt udt) in CsTypes.Index().Where(r => r.Item is CsUdt).Select(r => (r.Index, (CsUdt)r.Item!))) {
+      CsUdts[udt.TypeIndex] = udt;
+      if (i != udt.TypeIndex.ArrayIndex) {
+        CsUdts[TypeIndex.FromArrayIndex(i)] = udt;
+      }
+    }
+
+    Log.Step("Setting parents for all nested types");
+    var nestedIter = CsUdts.Values.OfType<CsStructure>()
+      .Where(p => p.Record.Options.HasFlag(ClassOptions.ContainsNestedClass))
+      .Select(p => (parent: p, p.Record.GetFields(Pdb).OfType<NestedTypeRecord>()));
+
+    Parallel.ForEach(nestedIter, iter => {
+      foreach (NestedTypeRecord nested in iter.Item2) {
+        if (CsUdts.TryGetValue(nested.Type, out CsUdt? nestedCs) && nestedCs.Record.IsNested) {
+          nestedCs.SetParent(iter.parent, nested);
+        }
+      }
+    });
+
+    // Force loading of lazy-loaded props
+    // If anything throws, we'll know before letting the program do IO.
+    foreach (CsUdt csUdt in CsUdts.Values) {
+      _ = csUdt.SelfName;
+
+      if (csUdt is CsStructure csStruct) {
+        _ = csStruct.BaseClasses;
+        _ = csStruct.NestedClasses;
+        foreach (CsInstanceField f in csStruct.InstanceFields) {
+          _ = f.FieldType;
+        }
+
+        foreach (CsStaticField f in csStruct.StaticFields) {
+          _ = f.FieldType;
+        }
+
+        foreach (CsInstanceMethod m in csStruct.InstanceMethods) {
+          _ = m.ParameterTypes;
+        }
+      }
+    }
+
+    Log.Step("Merging namespaces into types with the same name");
+    var rootTypes = CsUdts.Values.Where(c => c.Parent is null).ToArray();
+    foreach (CsUdt potentialChild in rootTypes.Where(c => c.Namespace is not null)) {
+      foreach (CsStructure potentialParent in rootTypes.OfType<CsStructure>()) {
+        if (ReferenceEquals(potentialParent, potentialChild)) {
+          continue;
+        }
+
+        if (potentialChild.Namespace! == potentialParent.FullName) {
+          potentialChild.SetParent(potentialParent, null);
+          potentialParent.NestedClasses.Add(potentialChild);
+          break;
+        }
+      }
+    }
   }
 
   private void Process() {
-    PreProcess();
-    Log.Step("Creating inline array types");
     WriteInlineArrays();
+    WriteGlobals();
+    _writers.CreateModuleFile();
 
-    Log.Step("Creating all other types... ");
-    int total = CsUdts.Values.Count(u => u.Parent is null);
-    int i = 0;
+    Log.Step("Writing all other types... ");
     HashSet<TypeIndex> created = [];
+    HashSet<string> duplicateNames = [];
     Dictionary<string, Dictionary<string, CsUdt>> addedClassesByNamespace = [];
     Dictionary<string, Dictionary<string, CsEnum>> addedEnumsByNamespace = [];
 
-    using ProgressBar progressBar = new();
-    foreach (CsUdt udt in CsUdts.Values.Where(u => u.Parent is null)) {
-      progressBar.Report((double)++i / total);
-      if (!created.Add(udt.TypeIndex)) {
+    Dictionary<string, HashSet<CsUdt>> duplicates = [];
+    foreach (CsUdt udt in CsUdts.Values) {
+      var h = CollectionsMarshal.GetValueRefOrAddDefault(duplicates, udt.FullyQualifiedName, out bool _) ??= [];
+      h.Add(udt);
+    }
+
+    var dups = duplicates.Where(v => v.Value.Count > 1).OrderBy(v => v.Key).ToArray();
+
+    // var ims = CsUdts
+    //   .Select(s => (s.Value,
+    //     (s.Value as CsStructure)?.InstanceMethods
+    //     .Where(m => m.MethodRecord.Options.HasFlag(FunctionOptions.Constructor)).ToArray()))
+    //   .Where(t => t.Item2 is { Length: > 0 })
+    //   .ToArray();
+
+    foreach (CsUdt udt in CsUdts.Values.Where(u => u.Parent is null)
+               .DistinctBy(u => u.TypeIndex)
+               .OrderBy(u => u.Record.IsForwardReference)
+               .ThenBy(u => u.FullyQualifiedName)) {
+      if (!created.Add(udt.TypeIndex) || !duplicateNames.Add(udt.FullyQualifiedName)) {
         // Was a forward reference that has a body defined in the pdb; both entries are identical
         continue;
       }
@@ -84,7 +194,7 @@ public sealed partial class SourceGen : IDisposable {
         case CsEnum csEnum: {
           if (CheckDuplicateName(csEnum, addedEnumsByNamespace)) {
             IndentedTextWriter writer = _writers.GetMatching(csEnum);
-            WriteEnum(csEnum, writer);
+            WriteEnumType(csEnum, writer);
           }
 
           break;
@@ -122,72 +232,121 @@ public sealed partial class SourceGen : IDisposable {
     }
   }
 
-  private void PreProcess() {
-    // Lets us get argument names for the methods, which are not available in the TPI stream.
-    Log.Step("Loading procedure info");
-    ProcedureHelper.Load(Pdb);
-    Records = PdbFile.TpiStream.GetTypeRecords();
-
-    Log.Step("Collecting tag records");
-    _tagRecords = Records
-      .Index()
-      .Where(r => r.Item is TagRecord tag && AllowedName(tag.Name.String))
-      .Select(r => ((TagRecord)r.Item, TypeIndex.FromArrayIndex(r.Index)))
-      .ToArray();
-
-    Log.Step("Creating non-forward reference types");
-    Parallel.ForEach(_tagRecords.Where(r => !r.tag.IsForwardReference),
-      iter => { CsType.GetOrCreate(this, iter.index); });
-
-    Log.Step("Resolving forward references");
-    Parallel.ForEach(_tagRecords.Index().Where(r => r.Item.tag.IsForwardReference), iter => {
-      (TagRecord tag, TypeIndex i) = iter.Item;
-
-      CsTypes[i.ArrayIndex] = ResolveForwardReference(tag, iter.Index, out TypeIndex rIndex)
-        ? CsTypes[rIndex.ArrayIndex]!
-        : CsType.GetOrCreate(this, i);
-    });
-
-    // Cannot use Paralle.ForEach to assign to dictionary
-    foreach ((int i, CsUdt udt) in CsTypes.Index().Where(r => r.Item is CsUdt).Select(r => (r.Index, (CsUdt)r.Item!))) {
-      CsUdts[udt.TypeIndex] = udt;
-      if (i != udt.TypeIndex.ArrayIndex) {
-        CsUdts[TypeIndex.FromArrayIndex(i)] = udt;
-      }
+  private void WriteGlobals() {
+    if (Pdb.GlobalVariables.Length <= 0) {
+      return;
     }
 
-    Log.Step("Setting parents for all nested types");
-    var nestedIter = CsUdts.Values
-      .Where(p => p.Record.Options.HasFlag(ClassOptions.ContainsNestedClass))
-      .Select(p => (parent: p, p.Record.GetFields(Pdb).OfType<NestedTypeRecord>()));
-
-    Parallel.ForEach(nestedIter, iter => {
-      foreach (NestedTypeRecord nested in iter.Item2) {
-        if (CsUdts.TryGetValue(nested.Type, out CsUdt? nestedCs) && nestedCs.Record.IsNested) {
-          nestedCs.SetParent(iter.parent, nested);
-        }
+    Log.Step("Writing globals");
+    IndentedTextWriter globalsWriter = _writers.GlobalsWriter;
+    globalsWriter.Write("public struct Globals {");
+    globalsWriter.Indent++;
+    HashSet<string> fields = [];
+    foreach (PdbGlobalVariable globalVar in Pdb.GlobalVariables.OrderBy(g => g.RelativeVirtualAddress)) {
+      TypeIndex type = globalVar.Type.TypeIndex;
+      CsType? csType = type.IsSimple ? CsSimpleTypes[type] : CsTypes[type.ArrayIndex];
+      if (csType is null || !fields.Add(globalVar.Name)) {
+        continue;
       }
-    });
 
-#if DEBUG
-    // Force loading of lazy-loaded props
-    // If anything throws, we'll know before letting the program do IO.
-    foreach (CsUdt csUdt in CsUdts.Values) {
-      _ = csUdt.FullyQualifiedName;
+      globalsWriter.Write("public static unsafe ref ");
+      globalsWriter.Write(csType.FullyQualifiedName);
+      globalsWriter.Write(' ');
+      globalsWriter.Write(globalVar.Name.SanitizeName(true, true));
+      globalsWriter.Write(" => ref *(");
+      globalsWriter.Write(csType.FullyQualifiedName);
+      globalsWriter.Write("*)(");
+      globalsWriter.Write(MemoryAddressFieldName);
+      globalsWriter.Write(" + 0x");
+      globalsWriter.Write($"{globalVar.RelativeVirtualAddress:X}");
+      globalsWriter.WriteLine(");");
+    }
 
-      if (csUdt is CsStructure csStruct) {
-        _ = csStruct.BaseClasses;
-        _ = csStruct.StaticFields;
-        foreach (CsInstanceField f in csStruct.InstanceFields) {
-          _ = f.FieldType;
+    globalsWriter.Indent--;
+    globalsWriter.Write('}');
+    globalsWriter.Flush();
+  }
+
+  private void ProcessProcedureInfo() {
+    DbiModuleList modules = PdbFile.DbiStream.Modules;
+    HashSet<string> argNames = [];
+    foreach (DbiModuleDescriptor module in modules) {
+      if (module.LocalSymbolStream == null) continue;
+
+      foreach (SymbolRecord symbol in module.LocalSymbolStream.AsEnumerable()) {
+        if (symbol is not ProcedureSymbol procSym) {
+          continue;
         }
 
-        foreach (CsInstanceMethod m in csStruct.InstanceMethods) {
-          _ = m.ParameterTypes;
+        (TypeIndex, string)[] args = procSym.Children.OfType<LocalSymbol>().Where(l =>
+            l.Flags.HasFlag(LocalVariableFlags.IsParam) &&
+            l.Name.String != "this")
+          .Select(l => (l.Type, l.Name.String))
+          .ToArray();
+
+        // Sanitize and deduplicate argument names, as they may be missing or invalid
+        argNames.Clear();
+        foreach ((int i, (TypeIndex _, string argName)) in args.Index()) {
+          ref string name = ref args[i].Item2;
+          if (string.IsNullOrWhiteSpace(argName)) {
+            name = $"arg{i + 1}";
+            continue;
+          }
+
+          if (!argNames.Add(argName)) {
+            name = $"{argName}_{i + 1}";
+          }
+
+          name = name.SanitizeName(true, true).KeywordToVerbatim();
+        }
+
+        TypeRecord? functionRecord = PdbFile.TryGetRecord(procSym.FunctionType);
+        if (functionRecord is ProcedureRecord gProc) {
+          (string, TypeIndex) gKey = (procSym.Name.String, procSym.FunctionType);
+          ProcedureInfo gProcInfo = new(procSym, args, args.Length == gProc.ParameterCount) {
+            Rva = PdbFile.FindRelativeVirtualAddress(procSym.Segment, procSym.Offset)
+          };
+          GProcCache.TryAdd(gKey, gProcInfo);
+          continue;
+        }
+
+        if (functionRecord is not MemberFunctionRecord mProc) {
+          continue;
+        }
+
+        string fullyQualifiedName = procSym.Name.String;
+
+        // Extract method name and parent class name
+        int lastColon = fullyQualifiedName.LastIndexOf("::", StringComparison.Ordinal);
+        if (lastColon == -1) continue; // Skip free/global functions
+
+        string methodName = fullyQualifiedName[(lastColon + 2)..];
+        string parentClassName = fullyQualifiedName[..lastColon];
+
+        (string, string, TypeIndex) mKey = (parentClassName, methodName, procSym.FunctionType);
+
+        ProcedureInfo mProcInfo = new(procSym, args, args.Length == mProc.ParameterCount) {
+          Rva = PdbFile.FindRelativeVirtualAddress(procSym.Segment, procSym.Offset)
+        };
+
+        // Handle potential duplicate entries from templates or incremental linking safely
+        ProcCache.TryAdd(mKey, mProcInfo);
+      }
+    }
+  }
+
+  private void ProcessVTables() {
+    foreach (Public32Symbol? s in PdbFile.PublicsStream.PublicSymbols) {
+      string name = s.Name.String;
+      if (name.StartsWith("??_7")) {
+        string undecoratedName = CsNameUndecorator.UnDecorateSymbolName(name);
+        int indexOf = undecoratedName.IndexOf(".`vftable'", StringComparison.Ordinal);
+        if (indexOf != -1) {
+          name = undecoratedName[..indexOf];
+          VTableAddresses[name] = PdbFile.FindRelativeVirtualAddress(s.Segment, s.Offset);
         }
       }
     }
-#endif
   }
 
   private bool ResolveForwardReference(TagRecord tag, int start, out TypeIndex index) {
@@ -213,270 +372,6 @@ public sealed partial class SourceGen : IDisposable {
   private static bool AllowedName(string name) {
     return !name.Contains("unnamed struct at") &&
       !name.Contains("`lambda at") && !name.Contains("<lambda_");
-  }
-
-  private static void WriteStruct(CsStructure csStruct, IndentedTextWriter writer) {
-    // Write XML doc
-    writer.Write("/// Struct type: ");
-    writer.WriteXmlDocText(csStruct.Record.Name.String);
-    writer.WriteXmlDocLinebreak();
-    writer.Write("UniqueName: ");
-    writer.WriteXmlDocText(csStruct.Record.UniqueName.String);
-    writer.WriteLine();
-
-    // Write GeneratedCode attribute
-    writer.WriteGeneratedCodeAttribute();
-
-    // Write StructLayout attribute with size
-    bool prependGlobal = false;
-    writer.Write("[");
-    writer.WriteIf("global::System.Runtime.InteropServices.", prependGlobal);
-    writer.Write("StructLayout(");
-    writer.WriteIf("global::System.Runtime.InteropServices.", prependGlobal);
-    writer.Write("LayoutKind.Explicit");
-    if (csStruct.Size > 0) {
-      writer.Write(", Size = ");
-      writer.Write(csStruct.Size);
-    }
-
-    writer.WriteLine(")]");
-
-    // Write struct declaration
-    writer.Write("public struct ");
-    writer.Write(csStruct.SelfName);
-    writer.WriteLine(" {");
-    writer.Indent++;
-
-    // Write base classes as fields
-    if (csStruct.BaseClasses.Length > 0) {
-      writer.WriteLine("#region Base Classes");
-      for (int i = 0; i < csStruct.BaseClasses.Length; i++) {
-        CsBaseClass baseClass = csStruct.BaseClasses[i];
-        if (baseClass.Record.Attributes.Access == MemberAccess.Private) {
-          continue;
-        }
-
-        writer.Write("/// Base class: ");
-        writer.WriteXmlDocText(baseClass.BaseClass.Record.Name.String);
-        writer.WriteXmlDocLinebreak();
-        writer.Write("TypeIndex: ");
-        writer.WriteXmlDocText(baseClass.BaseClass.TypeIndex.ToString());
-        writer.WriteLine();
-
-        // FieldOffset attribute
-        prependGlobal = false;
-        writer.Write("[");
-        writer.WriteIf("global::System.Runtime.InteropServices.", prependGlobal);
-        writer.Write("FieldOffset(");
-        writer.Write(baseClass.Record.Offset);
-        writer.Write(")] ");
-
-        // Field declaration
-        writer.Write("public ");
-        writer.Write(baseClass.BaseClass.FullyQualifiedName);
-        writer.Write(" Base");
-        if (csStruct.BaseClasses.Length > 1) {
-          writer.Write(i + 1);
-        }
-
-        writer.WriteLine(';');
-      }
-
-      writer.WriteLine("#endregion");
-    }
-
-    // Write static fields
-    if (csStruct.StaticFields.Any(s => s is CsConstantField or CsRegularStaticField)) {
-      writer.WriteLine("#region Static Fields");
-      foreach (CsStaticField field in csStruct.StaticFields) {
-        // XML doc for field
-        writer.Write("/// Field: ");
-        if (csStruct.PdbFile.TryGetRecord(field.FieldType.TypeIndex) is { } fieldTypeRecord) {
-          writer.WriteXmlDocText(fieldTypeRecord.ToString(csStruct.PdbFile));
-          writer.WriteXmlDocLinebreak();
-          writer.Write("TypeIndex ");
-          writer.WriteXmlDocText(field.FieldType.TypeIndex.ToString());
-          writer.WriteLine();
-        }
-        else {
-          writer.WriteXmlDocTextLine(field.FieldType.TypeIndex.ToString());
-        }
-
-        if (field is CsConstantField constant) {
-          TypeIndex fType = constant.FieldType.TypeIndex;
-          bool needsCast = fType.SimpleKind is not SimpleTypeKind.Float32 and not SimpleTypeKind.Boolean8;
-          writer.Write("public const ");
-          writer.Write(constant.FieldType.FullyQualifiedName);
-          writer.Write(' ');
-          writer.Write(constant.Name);
-          writer.Write(" = ");
-          if (needsCast) {
-            writer.Write("(");
-            writer.Write(constant.FieldType.FullyQualifiedName);
-            writer.Write(")(");
-          }
-
-          string value = !fType.IsSimple
-            ? constant.Value.ToString()!
-            : fType.SimpleKind switch {
-              SimpleTypeKind.Boolean8 => (ushort)constant.Value > 0 ? "true" : "false",
-              SimpleTypeKind.Float32 => BitConverter.UInt32BitsToSingle((uint)constant.Value)
-                .ToString(CultureInfo.CurrentCulture),
-              _ => constant.Value.ToString()!
-            };
-
-          writer.Write(value);
-          writer.WriteIf(")", needsCast);
-          writer.WriteLine(";");
-        }
-        else if (field is CsRegularStaticField staticField) {
-          writer.Write("public static ref ");
-          writer.Write(staticField.FieldType.FullyQualifiedName);
-          writer.Write(' ');
-          writer.Write(staticField.Name.KeywordToVerbatim());
-          writer.Write(" => ref *((");
-          writer.Write(staticField.FieldType.FullyQualifiedName);
-          writer.Write("*)(");
-          writer.Write(csStruct.SourceGen.MemoryAddressFieldName);
-          writer.Write(" + ");
-          writer.Write(staticField.RelativeVirtualAddress);
-          writer.WriteLine("));");
-        }
-      }
-
-      writer.WriteLine("#endregion");
-    }
-
-    // Write instance fields
-    if (csStruct.InstanceFields.Length > 0) {
-      writer.WriteLine("#region Instance Fields");
-      foreach (CsInstanceField field in csStruct.InstanceFields) {
-        // XML doc for field
-        writer.Write("/// Field: ");
-        if (csStruct.PdbFile.TryGetRecord(field.FieldType.TypeIndex) is { } fieldTypeRecord) {
-          writer.WriteXmlDocText(fieldTypeRecord.ToString(csStruct.PdbFile));
-          writer.WriteXmlDocLinebreak();
-          writer.Write("TypeIndex: ");
-          writer.WriteXmlDocText(field.FieldType.TypeIndex.ToString());
-          writer.WriteLine();
-        }
-        else {
-          writer.WriteXmlDocTextLine(field.FieldType.TypeIndex.ToString());
-        }
-
-        // FieldOffset attribute
-        prependGlobal = false;
-        writer.Write("[");
-        writer.WriteIf("global::System.Runtime.InteropServices.", prependGlobal);
-        writer.Write("FieldOffset(");
-        writer.Write(field.Offset);
-        writer.Write(")] ");
-
-        // Field declaration
-        writer.Write("public ");
-        writer.Write(field.FieldType.FullyQualifiedName);
-        writer.Write(' ');
-        writer.Write(field.Name.KeywordToVerbatim());
-        writer.WriteLine(';');
-      }
-
-      writer.WriteLine("#endregion");
-    }
-
-    // Write methods
-    if (csStruct.InstanceMethods.Length > 0) {
-      // TODO: Move static methods out of here (ideally out of CsStructure.InstanceMethods)
-      writer.WriteLine("#region Instance Methods");
-      foreach (CsInstanceMethod method in csStruct.InstanceMethods) {
-        writer.Write("public ");
-        writer.WriteIf("static ", method.IsStatic);
-
-        if (method.ReturnType is CsUdt { Record.IsForwardReference: true }) {
-          writer.Write("void* ");
-        }
-        else {
-          writer.Write(method.ReturnType.FullyQualifiedName);
-        }
-
-        writer.Write(' ');
-        writer.Write(method.Name.KeywordToVerbatim());
-        writer.Write('(');
-        var args = method.MethodRecord.ArgumentList.As<ArgumentListRecord>(method.PdbFile).Arguments;
-        for (int i = 0; i < args.Length; i++) {
-          if (i > 0) {
-            writer.Write(", ");
-          }
-
-          CsType argType = method.ParameterTypes[i];
-          string argName = method.ProcedureInfo?.GoodSize == true ? method.Args[i] : $"arg{i + 1}";
-          writer.Write(argType.FullName);
-          writer.Write(' ');
-          writer.Write(argName.KeywordToVerbatim());
-        }
-
-        writer.WriteLine(");");
-      }
-
-      writer.WriteLine("#endregion");
-    }
-
-    // Write nested types
-    if (csStruct.NestedClasses.Length > 0) {
-      writer.WriteLine("#region Nested Types");
-      foreach (CsStructure nested in csStruct.NestedClasses) {
-        WriteStruct(nested, writer);
-      }
-
-      writer.WriteLine("#endregion");
-    }
-
-    writer.Indent--;
-    writer.WriteLine("}");
-  }
-
-  private static void WriteEnum(CsEnum csEnum, IndentedTextWriter writer) {
-    // Get a compatible underlying type
-    string underlying = csEnum.Underlying.FullName;
-    if (underlying == "bool") {
-      underlying = "byte";
-    }
-
-    if (csEnum.Values.Any(v => v.Value is uint and > int.MaxValue)) {
-      underlying = "uint";
-    }
-
-    // Write XML doc
-    writer.Write("/// Enum type: ");
-    writer.WriteXmlDocText(csEnum.Record.Name.String);
-    writer.WriteXmlDocLinebreak();
-    writer.Write("UniqueName: ");
-    writer.WriteXmlDocText(csEnum.Record.UniqueName.String);
-    writer.WriteLine();
-
-    // Write GeneratedCode attribute
-    writer.WriteGeneratedCodeAttribute();
-
-    // Write enum declaration
-    writer.Write("public enum ");
-    writer.Write(csEnum.SelfName);
-    if (underlying is not "int") {
-      writer.Write(" : ");
-      writer.Write(underlying);
-    }
-
-    // Write enum body
-    writer.WriteLine(" {");
-    writer.Indent++;
-    foreach (CsEnumField enumValue in csEnum.Values) {
-      writer.Write(enumValue.Name.KeywordToVerbatim());
-      writer.Write(" = ");
-      writer.Write(enumValue.Value);
-      writer.WriteLine(',');
-    }
-
-    writer.Indent--;
-    writer.WriteLine("}");
-    writer.WriteLine();
   }
 
   public void Dispose() {

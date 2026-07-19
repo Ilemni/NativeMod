@@ -133,7 +133,7 @@ public static class ProcedureHelper {
         // Console.ResetColor();
       }
       else if (paramsLeft < 0) {
-        // Only warn if not a typical destructor
+        // Only warn if not a MSVC-generated destructor
         if (!procName.Contains('~') || paramCount != 0 || paramNames.Length != 1) {
           Log.Warn(
             $"Warning: {untypedRecord.Kind} Procedure {procName} with {paramCount} args has extra named args, total {paramNames.Length}");
@@ -151,11 +151,10 @@ public static class ProcedureHelper {
 
   /// Ensure all members not null
   /// SymbolRecord.Children property WILL throw if any children are null
-  private static void ReplaceNullSymbols(PdbFile pdb) {
+  internal static void ReplaceNullSymbols(PdbFile pdb) {
     var enumerable = pdb.DbiStream.Modules
       .Select(m => m.LocalSymbolStream)
-      .Where(s => s is not null)
-      .OrderBy(s => s!.References.Count);
+      .Where(s => s is not null);
     Parallel.ForEach(enumerable, mSymbols => {
       var cache = mSymbols.GetSymbolsCache();
       for (int i = 0; i < mSymbols.References.Count; i++) {
