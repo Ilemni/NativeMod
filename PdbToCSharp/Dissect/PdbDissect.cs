@@ -1,4 +1,5 @@
-﻿using System.Runtime.InteropServices;
+﻿using System.CodeDom.Compiler;
+using System.Runtime.InteropServices;
 using SharpPdb.Native;
 using SharpPdb.Native.Types;
 using SharpPdb.Windows;
@@ -17,53 +18,53 @@ internal static class PdbDissect {
     const string pdbPath = "mio.pdb";
     string pdbName = Path.GetFileNameWithoutExtension(pdbPath);
     string output = $"output/{pdbName}_";
+    Directory.CreateDirectory("output");
 
     using PdbFileReader pdbReader = new(pdbPath);
-    {
-      using (StreamWriter debugWriter = new(output + "functions.txt")) {
-        HashSet<string> funcNames = [];
-        const Flags flags = Flags.NoAllocationLanguage | Flags.NoAccessSpecifiers | Flags.NoLeadingUnderscores | Flags.NoMicrosoftKeywords | Flags.NoComplexType;
-        foreach (PdbPublicSymbol? sym in pdbReader.PublicSymbols.OrderBy(s => s.RelativeVirtualAddress)) {
-          string csName = CsNameUndecorator.UnDecorateSymbolName(sym.Name, flags);
-          if (!csName.Contains('(')) {
-            // Not a function
-            continue;
-          }
-          int argStartIndex = csName.IndexOf('(');
-          if (!csName.AsSpan(0, argStartIndex).Contains('.')) {
-            // Not a member function
-            continue;
-          }
-
-          if (csName.Contains("<lambda")) {
-            // Don't care about lambdas
-            continue;
-          }
-          if (csName.Contains("`RTTI")) {
-            // Don't care about this
-            continue;
-          }
-
-          debugWriter.Write("  RVA: 0x");
-          debugWriter.Write($"{sym.RelativeVirtualAddress:X}");
-          debugWriter.Write("   | C#: ");
-          debugWriter.Write(csName);
-
-          if (!funcNames.Add(csName)) {
-            // Already seen this function name
-            debugWriter.Write(" // Duplicate function name");
-          }
-          debugWriter.WriteLine();
+    using (StreamWriter debugWriter = new(output + "functions.txt")) {
+      HashSet<string> funcNames = [];
+      const Flags flags = Flags.NoAllocationLanguage | Flags.NoAccessSpecifiers | Flags.NoLeadingUnderscores |
+        Flags.NoMicrosoftKeywords | Flags.NoComplexType;
+      foreach (PdbPublicSymbol? sym in pdbReader.PublicSymbols.OrderBy(s => s.RelativeVirtualAddress)) {
+        string csName = CsNameUndecorator.UnDecorateSymbolName(sym.Name, flags);
+        if (!csName.Contains('(')) {
+          // Not a function
+          continue;
         }
-      }
 
-      return;
+        int argStartIndex = csName.IndexOf('(');
+        if (!csName.AsSpan(0, argStartIndex).Contains('.')) {
+          // Not a member function
+          continue;
+        }
+
+        if (csName.Contains("<lambda")) {
+          // Don't care about lambdas
+          continue;
+        }
+
+        if (csName.Contains("`RTTI")) {
+          // Don't care about this
+          continue;
+        }
+
+        debugWriter.Write("  RVA: 0x");
+        debugWriter.Write($"{sym.RelativeVirtualAddress:X}");
+        debugWriter.Write("   | C#: ");
+        debugWriter.Write(csName);
+
+        if (!funcNames.Add(csName)) {
+          // Already seen this function name
+          debugWriter.Write(" // Duplicate function name");
+        }
+
+        debugWriter.WriteLine();
+      }
     }
+
     PdbFile pdb = pdbReader.PdbFile;
-    ProcedureHelper.Load(pdbReader);
-    var tpiRecords = pdb.TpiStream.GetTypeRecords();
-    var ipiRecords = pdb.IpiStream.GetTypeRecords();
-    Directory.CreateDirectory("output");
+    ProcedureHelper.ReplaceNullSymbols(pdb);
+    // ProcedureHelper.Load(pdbReader);
 
     // Everything below this point is for debugging and analysis of the PDB file
 
@@ -82,7 +83,7 @@ internal static class PdbDissect {
 
       string AsStr(PdbFile p, TypeIndex t) {
         if (t.IsSimple) {
-          return t.SimpleKind is SimpleTypeKind.None ? "none" : SourceGen.ToCsName(t);
+          return t.SimpleKind is SimpleTypeKind.None ? "none" : Types.CsSimpleType.ToCsName(t);
         }
 
         TypeRecord? type = p.TryGetRecord(t);
@@ -95,10 +96,13 @@ internal static class PdbDissect {
       }
     }
 
+    WriteGlobals(output + "globals.txt", pdb);
+    WriteLocals(output + "locals.txt", pdb);
+
     WriteStatics(output + "statics.txt", pdbReader);
 
-
-
+    var tpiRecords = pdb.TpiStream.GetTypeRecords();
+    var ipiRecords = pdb.IpiStream.GetTypeRecords();
     string replacementText = Environment.NewLine + "\n    ";
     using (StreamWriter debugWriter = new(output + "tpi.txt")) {
       foreach (TypeRecord typeRecord in tpiRecords) {
@@ -172,8 +176,6 @@ internal static class PdbDissect {
       }
     }
 
-    WriteGlobals(output + "globals.txt", pdb);
-    WriteLocals(output + "locals.txt", pdb);
     // WriteCppHeader(output + ".h", pdb, tpiRecords);
     WriteTemplateNames(output + "template_names.txt", tpiRecords);
 
@@ -330,64 +332,60 @@ internal static class PdbDissect {
 
   private static void WriteLocals(string outputName, PdbFile pdb) {
     using StreamWriter symbolsWriter = new(outputName);
+    IndentedTextWriter writer = new(symbolsWriter);
     foreach (DbiModuleDescriptor module in pdb.DbiStream.Modules) {
       if (module.LocalSymbolStream is not { } mSymbols) {
         continue;
       }
 
-      symbolsWriter.WriteLine($"Module: {Path.GetFileName(module.ModuleName.String)}");
+      writer.Indent = 0;
+      writer.WriteLine($"Module: {Path.GetFileName(module.ModuleName.String)}");
+      writer.Indent++;
 
-      // Much of this method is messing around with indentation based on Inline, Block, and End symbols
-      bool hasAny = false;
-      int indentLevel = 0;
-      ReadOnlySpan<char> indent = new string('\t', 32);
-      string newLineIndent = string.Concat(Environment.NewLine, indent);
       int inlineDepth = 0;
       foreach (SymbolRecord symbolRecord in mSymbols.AsEnumerable()) {
         // This will sometimes throw due to some apparent parsing error
         try {
-          if (symbolRecord is (DefRangeRegisterRelativeSymbol or DefRangeRegisterSymbol
-              or DefRangeFramePointerRelativeSymbol or DefRangeSubfieldRegisterSymbol
-              or DefRangeFramePointerRelativeFullScopeSymbol)) {
+          if (symbolRecord
+              is DefRangeRegisterSymbol
+              or DefRangeRegisterRelativeSymbol
+              or DefRangeSubfieldRegisterSymbol
+              or DefRangeFramePointerRelativeSymbol
+              or DefRangeFramePointerRelativeFullScopeSymbol
+              // or LocalSymbol { Flags: LocalVariableFlags.IsOptimizedOut }
+             ) {
             continue;
           }
 
-          bool skip = symbolRecord is InlineSiteSymbol;
           if (symbolRecord is EndSymbol) {
-            indentLevel--;
-            if (indentLevel < 0) {
-              symbolsWriter.Write(
-                $"Warning: indentLevel < 0 for {symbolRecord.Kind} in module {module.ModuleName.String}");
-              indentLevel = 0;
-            }
-
-            skip = true;
+            writer.Indent--;
           }
 
+
           if (inlineDepth == 0) {
-            symbolsWriter.Write(indent[..indentLevel]);
-            if (symbolRecord is BlockSymbol) {
-              symbolsWriter.WriteLine('{');
-            }
-            else if (symbolRecord is InlineSiteSymbol inline) {
-              symbolsWriter.WriteLine(inline.ToString(pdb));
-            }
-            else if (symbolRecord is EndSymbol es) {
-              if (es.Kind == SymbolRecordKind.S_END) {
-                symbolsWriter.WriteLine('}');
-              }
-              else {
-                symbolsWriter.WriteLine($"}}\t/* Inline Site End */");
-              }
-            }
-            else {
-              symbolsWriter.WriteLine(symbolRecord.ToString(pdb).Replace(Environment.NewLine, newLineIndent[..(3 +
-                indentLevel)]));
+            writer.InnerWriter.Write($"[{symbolRecord.SymbolStreamIndex}] ");
+            switch (symbolRecord) {
+              case BlockSymbol block:
+                writer.Write("{ ");
+                writer.WriteLine(block.Name.String);
+                break;
+              case InlineSiteSymbol inline:
+                writer.WriteLine(inline.ToString(pdb));
+                break;
+              case EndSymbol { Kind: SymbolRecordKind.S_END }:
+                writer.WriteLine('}');
+                break;
+              case EndSymbol { Kind: SymbolRecordKind.S_INLINESITE_END }:
+                writer.WriteLine("}\t/* Inline Site End */");
+                break;
+              default:
+                writer.WriteLine(symbolRecord.ToString(pdb));
+                break;
             }
           }
 
           if (symbolRecord is InlineSiteSymbol or ProcedureSymbol or BlockSymbol) {
-            indentLevel++;
+            writer.Indent++;
           }
 
           if (symbolRecord is InlineSiteSymbol) {
@@ -398,12 +396,14 @@ internal static class PdbDissect {
           }
         }
         catch (Exception ex) {
-          symbolsWriter.WriteLine(
-            $"{{ Error writing symbol {symbolRecord.Kind} in module {module.ModuleName.String}: {ex} }}");
+          writer.WriteLine(
+            $"{{ Error writing symbol {symbolRecord.Kind} in module {module.ModuleName.String}: {ex.Message} }}");
         }
       }
 
       foreach (ProcedureSymbol proc in mSymbols.AsEnumerable().OfType<ProcedureSymbol>()) {
+        break;
+
         string procName = proc.Name.String;
         if (procName.Contains('<')
             || procName.StartsWith("std::", StringComparison.Ordinal)
@@ -418,42 +418,42 @@ internal static class PdbDissect {
         switch (funcRecord) {
           case ProcedureRecord procRecord:
             paramsLeft = procRecord.ParameterCount;
-            symbolsWriter.Write("\t/* PROC */ ");
+            writer.Write("\t/* PROC */ ");
 
             isStatic = proc.Kind is SymbolRecordKind.S_GPROC32;
             if (isStatic) {
-              symbolsWriter.Write("static ");
+              writer.Write("static ");
             }
 
-            symbolsWriter.Write(procRecord.ReturnType.ToString(pdb));
-            symbolsWriter.Write(' ');
-            symbolsWriter.Write(procName);
+            writer.Write(procRecord.ReturnType.ToString(pdb));
+            writer.Write(' ');
+            writer.Write(procName);
             break;
           case MemberFunctionRecord mFunc: {
             paramsLeft = mFunc.ParameterCount;
-            symbolsWriter.Write("\t/* MEMPROC */ ");
+            writer.Write("\t/* MEMPROC */ ");
             bool isConstructor = mFunc.Options.HasFlag(FunctionOptions.Constructor);
             isStatic = mFunc.ThisType is
               { IsSimple: true, SimpleKind: SimpleTypeKind.None or SimpleTypeKind.Void };
             if (isStatic) {
-              symbolsWriter.Write("static ");
+              writer.Write("static ");
             }
 
             if (isConstructor) {
-              symbolsWriter.Write("/* Ctor */ ");
+              writer.Write("/* Ctor */ ");
               // Return value is Void for constructors, but writing the class type is more informative
-              symbolsWriter.Write(mFunc.ClassType.ToString(pdb));
+              writer.Write(mFunc.ClassType.ToString(pdb));
             }
             else {
-              symbolsWriter.Write(mFunc.ReturnType.ToString(pdb));
+              writer.Write(mFunc.ReturnType.ToString(pdb));
             }
 
-            symbolsWriter.Write(' ');
+            writer.Write(' ');
             string className = mFunc.ClassType.ToString(pdb);
-            symbolsWriter.Write(className);
+            writer.Write(className);
             if (!isConstructor) {
-              symbolsWriter.Write("::");
-              symbolsWriter.Write(procName.AsSpan()[(className.Length + 2)..]);
+              writer.Write("::");
+              writer.Write(procName.AsSpan()[(className.Length + 2)..]);
             }
 
             break;
@@ -462,87 +462,148 @@ internal static class PdbDissect {
             continue;
         }
 
-        symbolsWriter.Write(" | ");
-        symbolsWriter.Write($"Size: {proc.CodeSize}, Offset: {proc.Offset}");
+        writer.Write(" | ");
+        writer.Write($"Size: {proc.CodeSize}, Offset: {proc.Offset}");
 
-        symbolsWriter.Write(" | Named Args: (");
+        writer.Write(" | Named Args: (");
         foreach (LocalSymbol local in proc.Children.OfType<LocalSymbol>()) {
           if (local.Name.String == "this" || !local.Flags.HasFlag(LocalVariableFlags.IsParam)) {
             continue;
           }
 
           if (paramsLeft == -1) {
-            symbolsWriter.Write("/* More local symbols that shouldn't be matched to a param */");
+            writer.Write("/* More local symbols that shouldn't be matched to a param */");
           }
 
-          symbolsWriter.Write(local.Type.ToString(pdb));
-          symbolsWriter.Write(' ');
-          symbolsWriter.Write(local.Name.String);
+          writer.Write(local.Type.ToString(pdb));
+          writer.Write(' ');
+          writer.Write(local.Name.String);
           if (--paramsLeft > 0) {
-            symbolsWriter.Write(", ");
+            writer.Write(", ");
           }
         }
 
         if (paramsLeft > 0) {
-          symbolsWriter.Write("/* Missing " + paramsLeft + " parameters */");
+          writer.Write("/* Missing " + paramsLeft + " parameters */");
         }
 
-        symbolsWriter.WriteLine(");");
-
-
-        hasAny = true;
-      }
-
-      if (hasAny) {
-        symbolsWriter.WriteLine();
+        writer.WriteLine(");");
       }
     }
   }
 
   private static void WriteGlobals(string outputName, PdbFile pdb) {
     ArrayCache<SymbolRecord> globalSymbols = pdb.GlobalsStream.Symbols;
-    using StreamWriter globalsWriter = new(outputName);
-    foreach (SymbolRecord symbol in globalSymbols) {
-      switch (symbol) {
-        case ConstantSymbol constant:
-          globalsWriter.WriteLine(
-            $"                  Constant {constant.Name.String}: {constant.TypeIndex.ToString(pdb)} = {constant.Value}");
-          break;
-        case ProcedureReferenceSymbol procRef:
-          globalsWriter.WriteLine(
-            $"{procRef.Offset:X8}:{procRef.Module:X6} | " +
-            $"Procedure Name=\"{procRef.Name.String}\", Module={procRef.Module}");
-          break;
-        case DataSymbol data:
-          globalsWriter.WriteLine($"{data.Offset:X8}:{data.Segment:X6} | " +
-            $"Data Name=\"{data.Name.String}\", Type={data.Type.ToString(pdb)}");
-          break;
-        case ThreadLocalDataSymbol threadLocalData:
-          globalsWriter.WriteLine($"{threadLocalData.Offset:X8}:{threadLocalData.Segment:X6} | " +
-            $"Thread Local Data Name=\"{threadLocalData.Name.String}\", Type={threadLocalData.Type.ToString(pdb)}");
-          break;
-        case UdtSymbol udt:
-          globalsWriter.WriteLine(
-            $"                  UDT Name=\"{udt.Name.String}\",Type={udt.Type.ToString(pdb)}");
-          break;
-        default:
-          globalsWriter.WriteLine($"                  Unknown Symbol Kind={symbol.Kind}, Type={symbol.GetType().Name}");
-          break;
+    for (int i = 0; i < pdb.GlobalsStream.HashRecords.Length; i++) {
+      _ = pdb.GlobalsStream.Symbols[i];
+    }
+
+    // using StreamWriter globalsWriter = new(outputName);
+    // foreach (SymbolRecord symbol in globalSymbols) {
+    //   break;
+    //   switch (symbol) {
+    //     case ConstantSymbol constant:
+    //       globalsWriter.WriteLine(
+    //         $"                  Constant {constant.Name.String}: {constant.TypeIndex.ToString(pdb)} = {constant.Value}");
+    //       break;
+    //     case ProcedureReferenceSymbol procRef:
+    //       globalsWriter.WriteLine(
+    //         $"{procRef.Offset:X8}:{procRef.Module:X6} | " +
+    //         $"Procedure Name=\"{procRef.Name.String}\", Module={procRef.Module}");
+    //       break;
+    //     case DataSymbol data:
+    //       globalsWriter.WriteLine($"{data.Offset:X8}:{data.Segment:X6} | " +
+    //         $"Data Name=\"{data.Name.String}\", Type={data.Type.ToString(pdb)}");
+    //       break;
+    //     case ThreadLocalDataSymbol threadLocalData:
+    //       globalsWriter.WriteLine($"{threadLocalData.Offset:X8}:{threadLocalData.Segment:X6} | " +
+    //         $"Thread Local Data Name=\"{threadLocalData.Name.String}\", Type={threadLocalData.Type.ToString(pdb)}");
+    //       break;
+    //     case UdtSymbol udt:
+    //       globalsWriter.WriteLine(
+    //         $"                  UDT Name=\"{udt.Name.String}\",Type={udt.Type.ToString(pdb)}");
+    //       break;
+    //     default:
+    //       globalsWriter.WriteLine($"                  Unknown Symbol Kind={symbol.Kind}, Type={symbol.GetType().Name}");
+    //       break;
+    //   }
+    // }
+
+    string? previousName = null;
+    bool prevNameWritten = false;
+    using StreamWriter procWriter = new(outputName.Replace(".txt", "_procedures.txt"));
+    foreach (((ProcedureReferenceSymbol prs, ProcedureSymbol ps), uint rva) in GetProcedureReferenceRvas(pdb)
+               .OrderBy(kv => kv.Key.Item1.Name.String)
+            ) {
+      TypeRecord? record = pdb.TryGetRecord(ps.FunctionType);
+      if (ps.FunctionType.Index == 0) {
+        continue;
+      }
+      ProcedureRecord? asProc = record as ProcedureRecord;
+      MemberFunctionRecord? asMfunc = record as MemberFunctionRecord;
+      if (asProc is null && asMfunc is null) {
+        continue;
+      }
+
+      ArgumentListRecord argList = (asProc?.ArgumentList ?? asMfunc!.ArgumentList).As<ArgumentListRecord>(pdb);
+      TypeIndex returnType = asProc?.ReturnType ?? asMfunc!.ReturnType;
+
+      string args = string.Join(", ", argList.Arguments.Select(a => a.ToString(pdb)));
+      string name = $"{returnType.ToString(pdb),32} {prs.Name.String}({args})";
+      if (name == previousName) {
+        if (!prevNameWritten) {
+          procWriter.WriteLine($"{previousName} = {rva}");
+          prevNameWritten = true;
+        }
+        procWriter.WriteLine($"{name} = {rva}");
+        continue;
+      }
+      previousName = name;
+      prevNameWritten = false;
+    }
+  }
+
+  public static Dictionary<(ProcedureReferenceSymbol, ProcedureSymbol), uint> GetProcedureReferenceRvas(PdbFile pdb) {
+    Dictionary<(ProcedureReferenceSymbol, ProcedureSymbol), uint> results = [];
+
+    if (pdb.DbiStream is null) {
+      throw new InvalidOperationException("PDB file is missing a valid DBI stream or Section Map.");
+    }
+
+    var modules = pdb.DbiStream.Modules;
+    var sectionMap = pdb.DbiStream.SectionMap;
+
+    var syms = pdb.GlobalsStream.Symbols;
+    for (int i = 0; i < syms.Count; i++) {
+      if (syms[i] is not ProcedureReferenceSymbol refSym) {
+        continue;
+      }
+
+      // Modules use 1-based indexing
+      int moduleIndex = refSym.Module - 1;
+      if (moduleIndex < 0 || moduleIndex >= modules.Count ||
+          modules[moduleIndex]?.LocalSymbolStream is not { } localSymStream) {
+        continue;
+      }
+
+      // 2. Look up the underlying ProcedureSymbol inside the module's local symbol stream
+      localSymStream.TryGetSymbolRecordByOffset(refSym.Offset, out SymbolRecord? localSym);
+      if (localSym is not ProcedureSymbol procSym) {
+        continue;
+      }
+
+      // Segments use 1-based indexing
+      int sectionIndex = procSym.Segment - 1;
+      if (sectionIndex >= 0 && sectionIndex < sectionMap.Length) {
+        SectionMapEntry sectionHeader = sectionMap[sectionIndex];
+
+        // 4. Calculate RVA using the underlying procedure's actual memory segment
+        uint rva = sectionHeader.Offset + procSym.Offset;
+        results.Add((refSym, procSym), rva);
       }
     }
 
-    using StreamWriter procWriter = new(outputName.Replace(".txt", "_procedures.txt"));
-    var procRefs = globalSymbols.OfType<ProcedureReferenceSymbol>()
-      .OrderBy(p => p.Offset)
-      .ThenBy(p => p.Module)
-      .ToArray();
-
-    foreach (ProcedureReferenceSymbol procRef in procRefs) {
-      procWriter.WriteLine(
-        $"{procRef.Offset:X8}:{procRef.Module:X6} | " +
-        $"Procedure Name=\"{procRef.Name.String}\" | " +
-        $"RVA=0x{pdb.FindRelativeVirtualAddress(procRef.Module, procRef.Offset):X8}");
-    }
+    return results;
   }
 
   private static void WriteStatics(string outputName, PdbFileReader pdbReader) {
@@ -552,7 +613,7 @@ internal static class PdbDissect {
                .Select(gv => (gv, gv.RelativeVirtualAddress))
                .OrderBy(pair => pair.RelativeVirtualAddress)) {
       string dataName = data.Name;
-      string typeName = data.Type.TypeIndex.IsSimple ? SourceGen.ToCsName(data.Type.TypeIndex) : data.Type.Name;
+      string typeName = data.Type.TypeIndex.IsSimple ? Types.CsSimpleType.ToCsName(data.Type.TypeIndex) : data.Type.Name;
 
       if (rva == 0 ||
           typeName.StartsWith('*') ||
@@ -574,7 +635,7 @@ internal static class PdbDissect {
           w.Write("// ");
         }
 
-        typeName = eType.TypeIndex.IsSimple ? SourceGen.ToCsName(eType.TypeIndex) : eType.Name;
+        typeName = eType.TypeIndex.IsSimple ? Types.CsSimpleType.ToCsName(eType.TypeIndex) : eType.Name;
 
         w.Write("public static unsafe Span<");
         w.Write(typeName);

@@ -88,32 +88,41 @@ internal static class TypeSymbolExtensions {
 
   public static string ToString(this ConstantSymbol s, PdbFile pdb) {
     return
-      $"/* const " +
+      $"const " +
+      $"{s.Name} : " +
       $"{s.TypeIndex.ToString(pdb)} " +
-      $"{s.Name} " +
-      $"= {s.Value} " +
-      $"*/";
+      $"= {s.Value}";
   }
 
   public static string ToString(this DataSymbol s, PdbFile pdb) {
     return
       $"/* Data:" +
-      $"Offset = {s.Offset:X8}:{s.Segment:X4} " +
-      $"Name = {s.Name.String} " +
+      $"RVA = {pdb.FindRelativeVirtualAddress(s.Segment, s.Offset)} " +
       $"Type = {s.Type.ToString(pdb)} " +
+      $"Name = {s.Name.String} " +
       $"*/";
   }
 
   public static string ToString(this DefRangeFramePointerRelativeFullScopeSymbol s, PdbFile pdb) {
     using var _ = Rent(out StringBuilder sb);
-    return sb.ToString();
+    return sb
+      .Append("/* In Stack Frame (fixed) at ")
+      .Append($"Offset = {s.Offset:X} */")
+      .ToString();
   }
 
   public static string ToString(this DefRangeFramePointerRelativeSymbol s, PdbFile pdb) {
     using var _ = Rent(out StringBuilder sb);
-    sb.Append("/* Frame Pointer Relative Range: ")
-      .Append($"Offset = {s.Offset:X8} ")
-      .Append($"Range = {s.Range.OffsetStart:X8}:{s.Range.Range:X4} ");
+    sb.Append("/* In Stack Frame at ")
+      .Append($"Offset = {s.Offset:X} ")
+      .Append($"Range = {s.Range.OffsetStart:X}:{s.Range.Range:X}");
+
+    if (s.Gaps.Length == 0) {
+      return sb
+        .Append(" */")
+        .ToString();
+    }
+
     sb.Append("Gaps: { ");
     bool notFirst = false;
     foreach (LocalVariableAddressGap localVariableAddressGap in s.Gaps) {
@@ -125,18 +134,25 @@ internal static class TypeSymbolExtensions {
       notFirst = true;
     }
 
-    sb.Append(" } */");
-
-    return sb.ToString();
+    return sb
+      .Append(" } */")
+      .ToString();
   }
 
   public static string ToString(this DefRangeRegisterRelativeSymbol s, PdbFile pdb) {
     using var _ = Rent(out StringBuilder sb);
     sb.Append("/* Register Relative Range: ")
-      .Append($"Register = {s.Register} ")
-      .Append($"Flags = {s.Flags:X4} ")
-      .Append($"Offset = {s.BasePointerOffset:X8} ")
-      .Append($"Range = {s.Range.OffsetStart:X8}:{s.Range.Range:X4} ");
+      .Append($"{s.Register,-5} ")
+      .Append($"Offset = {s.BasePointerOffset:X} ")
+      .Append($"Range = {s.Range.OffsetStart:X}:{s.Range.Range:X} ")
+      .Append($"Flags = {s.Flags:X4} ");
+
+    if (s.Gaps.Length == 0) {
+      return sb
+        .Append("*/")
+        .ToString();
+    }
+
     sb.Append("Gaps: { ");
     bool notFirst = false;
     foreach (LocalVariableAddressGap localVariableAddressGap in s.Gaps) {
@@ -155,11 +171,17 @@ internal static class TypeSymbolExtensions {
 
   public static string ToString(this DefRangeRegisterSymbol s, PdbFile pdb) {
     using var _ = Rent(out StringBuilder sb);
-    sb.Append("/* Register Range: ")
-      .Append($"Register = {s.Register} ")
+    sb.Append("/* In Register ")
+      .Append($"{s.Register,-5} ")
       .AppendIf(s.MayHaveNoName != 0, $"MayHaveNoName = {s.MayHaveNoName:X4} ")
-      .Append($"Range = {s.Range.OffsetStart:X8}:{s.Range.Range:X4} ");
-    sb.Append("Gaps: { ");
+      .AppendIf(s.Range.OffsetStart != 0 || s.Range.Range != 0, $"Range = {s.Range.OffsetStart:X}:{s.Range.Range:X}");
+    if (s.Gaps.Length == 0) {
+      return sb
+        .Append(" */")
+        .ToString();
+    }
+
+    sb.Append(" Gaps: { ");
     bool notFirst = false;
     foreach (LocalVariableAddressGap localVariableAddressGap in s.Gaps) {
       if (notFirst) {
@@ -170,18 +192,25 @@ internal static class TypeSymbolExtensions {
       notFirst = true;
     }
 
-    sb.Append(" } */");
-
-    return sb.ToString();
+    return sb
+      .Append(" } */")
+      .ToString();
   }
 
   public static string ToString(this DefRangeSubfieldRegisterSymbol s, PdbFile pdb) {
     using var _ = Rent(out StringBuilder sb);
-    sb.Append("/* Register Subfield Range: ")
-      .Append($"Register = {s.Register} ")
+    sb.Append("/* In Register Range ")
+      .Append($"{s.Register,-5} ")
       .AppendIf(s.MayHaveNoName != 0, $"MayHaveNoName = {s.MayHaveNoName:X4} ")
-      .Append($"OffsetInParent = {s.OffsetInParent:X8} ")
-      .Append($"Range = {s.Range.OffsetStart:X8}:{s.Range.Range:X4} ");
+      .AppendIf(s.Range.OffsetStart != 0 || s.Range.Range != 0,
+        $"Range = {s.Range.OffsetStart:X}:{s.Range.Range:X} ")
+      .AppendIf(s.OffsetInParent != 0, $"OffsetInParent = {s.OffsetInParent:X} ");
+    if (s.Gaps.Length == 0) {
+      return sb
+        .Append(" */")
+        .ToString();
+    }
+
     sb.Append("Gaps: { ");
     bool notFirst = false;
     foreach (LocalVariableAddressGap localVariableAddressGap in s.Gaps) {
@@ -193,9 +222,9 @@ internal static class TypeSymbolExtensions {
       notFirst = true;
     }
 
-    sb.Append(" } */");
-
-    return sb.ToString();
+    return sb
+      .Append(" } */")
+      .ToString();
   }
 
   public static string ToString(this EndSymbol s, PdbFile pdb) {
@@ -253,17 +282,42 @@ internal static class TypeSymbolExtensions {
 
   public static string ToString(this FrameProcedureSymbol s, PdbFile pdb) {
     using var _ = Rent(out StringBuilder sb);
-    return sb
-      .Append("/* Frame Procedure: ")
-      .AppendIf(s.Flags != 0, $"Flags = {s.Flags} ")
-      .AppendIf(s.TotalFrameBytes != 0, $"TotalFrameBytes = {s.TotalFrameBytes:X4} ")
-      .AppendIf(s.PaddingFrameBytes != 0, $"PaddingBytes = {s.PaddingFrameBytes:X4} ")
-      .AppendIf(s.OffsetToPadding != 0, $"OffsetToPadding = {s.OffsetToPadding:X8} ")
-      .AppendIf(s.OffsetOfExceptionHandler != 0, $"OffsetOfExceptionHandler = {s.OffsetOfExceptionHandler:X8} ")
+
+    sb.Append("/* Frame Procedure: ")
+      .AppendIf(s.TotalFrameBytes != 0, $"TotalFrameBytes = {s.TotalFrameBytes:X} ")
+      .AppendIf(s.PaddingFrameBytes != 0, $"PaddingBytes = {s.PaddingFrameBytes:X} ")
+      .AppendIf(s.OffsetToPadding != 0, $"OffsetToPadding = {s.OffsetToPadding:X} ")
+      .AppendIf(s.OffsetOfExceptionHandler != 0, $"OffsetOfExceptionHandler = {s.OffsetOfExceptionHandler:X} ")
       .AppendIf(s.SectionIdOfExceptionHandler != 0,
-        $"SectionIdOfExceptionHandler = {s.SectionIdOfExceptionHandler:X8} ")
+        $"SectionIdOfExceptionHandler = {s.SectionIdOfExceptionHandler:X} ")
       .AppendIf(s.BytesOfCalleeSavedRegisters != 0,
-        $"BytesOfCalleeSavedRegisters = {s.BytesOfCalleeSavedRegisters:X4} ")
+        $"BytesOfCalleeSavedRegisters = {s.BytesOfCalleeSavedRegisters:X} ");
+    if (s.Flags != 0) {
+      sb.Append("Flags = ")
+        .AppendIf(s.Flags.HasFlag(FrameProcedureOptions.HasAlloca), "HasAlloca ")
+        .AppendIf(s.Flags.HasFlag(FrameProcedureOptions.HasSetJmp), "HasSetJmp ")
+        .AppendIf(s.Flags.HasFlag(FrameProcedureOptions.HasLongJmp), "HasLongJmp ")
+        .AppendIf(s.Flags.HasFlag(FrameProcedureOptions.HasInlineAssembly), "HasInlineAssembly ")
+        .AppendIf(s.Flags.HasFlag(FrameProcedureOptions.HasExceptionHandling), "HasExceptionHandling ")
+        .AppendIf(s.Flags.HasFlag(FrameProcedureOptions.MarkedInline), "MarkedInline ")
+        .AppendIf(s.Flags.HasFlag(FrameProcedureOptions.HasStructuredExceptionHandling), "HasStructuredExceptionHandling ")
+        .AppendIf(s.Flags.HasFlag(FrameProcedureOptions.Naked), "Naked ")
+        .AppendIf(s.Flags.HasFlag(FrameProcedureOptions.SecurityChecks), "SecurityChecks ")
+        .AppendIf(s.Flags.HasFlag(FrameProcedureOptions.AsynchronousExceptionHandling), "AsynchronousExceptionHandling ")
+        .AppendIf(s.Flags.HasFlag(FrameProcedureOptions.NoStackOrderingForSecurityChecks), "NoStackOrderingForSecurityChecks ")
+        .AppendIf(s.Flags.HasFlag(FrameProcedureOptions.Inlined), "Inlined ")
+        .AppendIf(s.Flags.HasFlag(FrameProcedureOptions.StrictSecurityChecks), "StrictSecurityChecks ")
+        .AppendIf(s.Flags.HasFlag(FrameProcedureOptions.SafeBuffers), "SafeBuffers ")
+        .AppendIf(s.Flags.HasFlag(FrameProcedureOptions.EncodedLocalBasePointerMask), "EncodedLocalBasePointerMask ")
+        .AppendIf(s.Flags.HasFlag(FrameProcedureOptions.EncodedParamBasePointerMask), "EncodedParamBasePointerMask ")
+        .AppendIf(s.Flags.HasFlag(FrameProcedureOptions.ProfileGuidedOptimization), "ProfileGuidedOptimization ")
+        .AppendIf(s.Flags.HasFlag(FrameProcedureOptions.ValidProfileCounts), "ValidProfileCounts ")
+        .AppendIf(s.Flags.HasFlag(FrameProcedureOptions.OptimizedForSpeed), "OptimizedForSpeed ")
+        .AppendIf(s.Flags.HasFlag(FrameProcedureOptions.GuardCfg), "GuardCfg ")
+        .AppendIf(s.Flags.HasFlag(FrameProcedureOptions.GuardCfw), "GuardCfw ");
+    }
+
+    return sb
       .Append("*/")
       .ToString();
   }
@@ -279,6 +333,10 @@ internal static class TypeSymbolExtensions {
 
     sb.AppendLine("}")
       .Append("Invocations = {");
+    if (s.Invocations.Length != 0) {
+      sb.AppendLine();
+    }
+
     foreach (uint numInvocations in s.Invocations) {
       sb.Append("    ")
         .Append(numInvocations)
@@ -300,16 +358,28 @@ internal static class TypeSymbolExtensions {
   }
 
   public static string ToString(this InlineSiteSymbol s, PdbFile pdb) {
-    // Skipping for now
-    TypeRecord record = pdb.GetRecord(s.Inlinee, pdb.IpiStream);
+    TypeRecord? record = pdb.TryGetRecord(s.Inlinee, pdb.IpiStream);
+    string funcName;
+    string start = $"Inlined[{s.End - s.ParentOffset,4:X}] ";
     if (record is MemberFunctionIdRecord mFuncId) {
-      record = pdb.GetRecord(mFuncId.FunctionType);
-    }
-    else if (record is FunctionIdRecord funcId) {
-      record = pdb.GetRecord(funcId.FunctionType);
+      MemberFunctionRecord mFunc = pdb.GetRecord<MemberFunctionRecord>(mFuncId.FunctionType);
+      TypeRecord? classType = pdb.TryGetRecord(mFuncId.ClassType);
+      string className = (classType as TagRecord)?.Name.String ?? mFuncId.ClassType.SimpleTypeName;
+      funcName = mFuncId.Name.String;
+      var args = mFunc.ArgumentList.As<ArgumentListRecord>(pdb).Arguments;
+      string argStr = string.Join(", ", args.Select(a => a.ToString(pdb)));
+      return $"{start}{className}::{funcName}({argStr});";
     }
 
-    return $"/* Inline Site: Inlinee = {record.ToString(pdb)} */";
+    if (record is FunctionIdRecord funcId) {
+      ProcedureRecord proc = pdb.GetRecord<ProcedureRecord>(funcId.FunctionType);
+      var args = proc.ArgumentList.As<ArgumentListRecord>(pdb).Arguments;
+      funcName = funcId.Name.String;
+      string argStr = string.Join(", ", args.Select(a => a.ToString(pdb)));
+      return $"{start}static {funcName}({argStr});";
+    }
+
+    return $"{start}Unknown function type {record?.GetType().Name ?? s.Inlinee.ToString()} */";
   }
 
   public static string ToString(this LabelSymbol s, PdbFile pdb) {
@@ -323,11 +393,10 @@ internal static class TypeSymbolExtensions {
 
   public static string ToString(this LocalSymbol s, PdbFile pdb) {
     return
-      $"/* Local " +
-      $"{s.Type.ToString(pdb)} " +
-      $"{s.Name} " +
-      (s.Flags != 0 ? $"// Flags = {s.Flags} " : "") +
-      "*/";
+      $"var " +
+      $"{s.Name} : " +
+      $"{s.Type.ToString(pdb)}; " +
+      (s.Flags != 0 ? $"// Flags = {s.Flags} " : "");
   }
 
   public static string ToString(this ManagedProcedureSymbol s, PdbFile pdb) {
@@ -374,7 +443,7 @@ internal static class TypeSymbolExtensions {
       $"*/";
   }
 
-  public static string ToString(this ProcedureSymbol procedureSymbol, PdbFile pdb) {
+  public static string ToString(this ProcedureSymbol procedureSymbol, PdbFile pdb, string? methodName = null) {
     using var _ = Rent(out StringBuilder sb);
     TypeRecord? funcRecord = pdb.TryGetRecord(procedureSymbol.FunctionType);
     string procName = procedureSymbol.Name.String;
@@ -385,8 +454,7 @@ internal static class TypeSymbolExtensions {
         paramsLeft = procRecord.ParameterCount;
         isStatic = procedureSymbol.Kind is SymbolRecordKind.S_GPROC32;
 
-        sb.Append("/*    PROC */ ")
-          .AppendIf(isStatic, "static ")
+        sb.AppendIf(isStatic, "static ")
           .Append(procRecord.ReturnType.ToString(pdb))
           .Append(' ')
           .Append(procName);
@@ -398,13 +466,11 @@ internal static class TypeSymbolExtensions {
         bool isConstructor = mFunc.Options.HasFlag(FunctionOptions.Constructor);
         string className = mFunc.ClassType.ToString(pdb);
 
-        sb.Append("/* MEMPROC */ ")
-          .AppendIf(isStatic, "static ")
-          .AppendIf(isConstructor, "/* Ctor */ ")
+        sb.AppendIf(isStatic, "static ")
           // Return value is Void for constructors, but writing the class type is more informative
           .Append((isConstructor ? mFunc.ClassType : mFunc.ReturnType).ToString(pdb))
-          .Append(' ')
-          .Append(className)
+          .AppendIf(!isConstructor, " ")
+          .AppendIf(!isConstructor, className)
           .AppendIf(!isConstructor, "::")
           .AppendIf(!isConstructor, procName.AsSpan()[(className.Length + 2)..]);
 
@@ -439,7 +505,7 @@ internal static class TypeSymbolExtensions {
 
     return sb
       .AppendIf(paramsLeft > 0, "/* Missing " + paramsLeft + " parameters */")
-      .Append(");")
+      .Append(')')
       .ToString();
   }
 

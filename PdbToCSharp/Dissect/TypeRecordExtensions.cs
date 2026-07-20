@@ -168,13 +168,20 @@ internal static partial class TypeRecordExtensions {
       sb.Append(memberFunctionRecord.ReturnType.ToString(pdb));
     }
 
-    sb.Append(' ');
-    string className = memberFunctionRecord.ClassType.ToString(pdb);
-    sb.Append(className);
     if (!isConstructor) {
-      sb.Append("::");
-      // sb.Append(procName.AsSpan()[(className.Length + 2)..]);
+      sb.Append(' ');
+      string className = memberFunctionRecord.ClassType.ToString(pdb);
+      sb.Append(className);
+      if (!isConstructor) {
+        // sb.Append("::");
+        // sb.Append(procName.AsSpan()[(className.Length + 2)..]);
+      }
     }
+
+    ArgumentListRecord args = memberFunctionRecord.ArgumentList.As<ArgumentListRecord>(pdb);
+    sb.Append('(')
+      .Append(args.ToString(pdb))
+      .Append(')');
 
     return sb.ToString();
   }
@@ -257,7 +264,7 @@ internal static partial class TypeRecordExtensions {
   public static string ToString(this PointerRecord pointerRecord, PdbFile pdb) {
     using var _ = Rent(out StringBuilder sb);
     return sb
-        // TODO: along with this whole file, ensure everything is useful for C# code gen
+      // TODO: along with this whole file, ensure everything is useful for C# code gen
       // commented out for C# code gen
       //.AppendIf(pointerRecord.IsConst, "const ")
       .AppendIf(pointerRecord.IsVolatile, "volatile ")

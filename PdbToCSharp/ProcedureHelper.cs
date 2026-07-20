@@ -30,11 +30,9 @@ public readonly record struct ProcedureInfo(
 /// Class that loads and stores procedure info. Includes parameter names
 /// </summary>
 public static class ProcedureHelper {
-  public static readonly Dictionary<(TypeIndex FunctionType, string Name), ProcedureInfo> Names = [];
-  public static readonly Dictionary<(TypeIndex FunctionType, string Name), ProcedureInfo> MemberNames = [];
-  public static readonly Dictionary<TypeIndex, ProcedureInfo> Functions = [];
-  public static IEnumerable<ProcedureInfo> Procedures => Names.Values.OrderBy(p => p.Procedure.Name.String);
-  public static IEnumerable<ProcedureInfo> MProcedures => MemberNames.Values.OrderBy(p => p.Procedure.Name.String);
+  private static readonly Dictionary<(TypeIndex FunctionType, string Name), ProcedureInfo> Names = [];
+  private static readonly Dictionary<(TypeIndex FunctionType, string Name), ProcedureInfo> MemberNames = [];
+  private static readonly Dictionary<TypeIndex, ProcedureInfo> Functions = [];
 
   public static void Load(PdbFileReader pdbReader) {
     PdbFile pdb = pdbReader.PdbFile;
