@@ -17,59 +17,85 @@ public sealed partial class SourceGen {
     IndentedTextWriter writer = _writers.InlineArrayWriter;
     // We are using pointers in many of the inline arrays
     // TODO: since they are not supported, should strongly consider switching these to IntPtr or ulong
-    writer.WriteLine("#pragma warning disable CS9184 // Inline array attribute is has unsupported type");
 
     HashSet<string> inlineArrayNames = [];
     // Sort arrays so that we process non-array element types first.
     foreach (CsArray arr in CsTypes.OfType<CsArray>()) {
-      string name = arr.FullName;
-      ulong count = arr.Count;
-
-      CsType elementType = arr.ElementType;
-      while (elementType is CsArray innerArray) {
-        elementType = innerArray.ElementType;
-      }
-
-      // Only create the type if it's not a duplicate
-      if (!inlineArrayNames.Add(name)) {
-        // Log.Warn($"Duplicate inline array type: {name}");
-        continue;
-      }
-
-      // XmlDoc type info
-      writer.Write("/// Inline array: ");
-      writer.WriteXmlDocText(elementType.ToString());
-      writer.WriteXmlDocText("[");
-      writer.WriteXmlDocText(count.ToString());
-      writer.WriteXmlDocText("] (TypeIndex ");
-      writer.WriteXmlDocText(arr.TypeIndex.ToString());
-      writer.WriteXmlDocTextLine(")");
-
-      // GeneratedCode attribute
-      writer.WriteGeneratedCodeAttribute();
-
-      // InlineArray attribute
-      writer.Write("[System.Runtime.CompilerServices.InlineArray(");
-      writer.Write(Math.Max(count, 1));
-      writer.WriteLine(")]");
-
-      // Write struct declaration
-      writer.Write("public ");
-      if (elementType is CsPointerType or CsSimplePointerType) {
-        writer.Write("unsafe ");
-      }
-      writer.Write("struct ");
-      writer.Write(name);
-
-      // Write struct body
-      writer.WriteLine(" {");
-      writer.Indent++;
-      writer.Write("private ");
-      writer.Write(elementType.FullyQualifiedName);
-      writer.WriteLine(" _element0;");
-      writer.Indent--;
-      writer.WriteLine('}');
-      writer.WriteLine();
+      WriteArray(arr, writer, inlineArrayNames);
     }
+  }
+
+  private static void WriteArray(CsArray arr, IndentedTextWriter writer, HashSet<string> inlineArrayNames) {
+    if (arr.ElementType is CsArray innerArray && !inlineArrayNames.Contains(innerArray.FullName)) {
+      // Write the inner array first
+      WriteArray(innerArray, writer, inlineArrayNames);
+    }
+
+    string name = arr.FullName;
+    ulong count = arr.Count;
+
+    CsType elementType = arr.ElementType;
+    bool isPtr = elementType is CsPointerType or CsSimplePointerType;
+    string elementTypeName = isPtr
+      ? "ulong"
+      : elementType.FullyQualifiedName;
+
+    // Only create the type if it's not a duplicate
+    if (!inlineArrayNames.Add(name)) {
+      // Log.Warn($"Duplicate inline array type: {name}");
+      return;
+    }
+
+    // XmlDoc type info
+    writer.Write("/// Inline array: ");
+    writer.WriteXmlDocText(elementType.FullName);
+    writer.WriteXmlDocText("[");
+    writer.WriteXmlDocText(count.ToString());
+    writer.WriteXmlDocText("] (TypeIndex ");
+    writer.WriteXmlDocText(arr.TypeIndex.ToString());
+    writer.WriteXmlDocTextLine(")");
+    CsType inner = arr.InnerElement;
+    if (inner is CsPointerType or CsSimplePointerType) {
+      // Write notice that this must be cast to pointer
+      if (isPtr) {
+        writer.Write("/// NOTE! The element type ");
+        writer.WriteXmlDocText(elementTypeName);
+      }
+      else {
+        writer.Write("/// NOTE! The inner element type");
+      }
+      writer.Write(" must be cast to a pointer of type ");
+      if (inner.Namespace is { } ns) {
+        writer.WriteXmlDocText(ns);
+        writer.Write('.');
+      }
+      writer.WriteXmlDocTextLine(inner.FullName);
+    }
+
+    // GeneratedCode attribute
+    writer.WriteGeneratedCodeAttribute();
+
+    // InlineArray attribute
+    writer.Write("[System.Runtime.CompilerServices.InlineArray(");
+    writer.Write(Math.Max(count, 1));
+    writer.WriteLine(")]");
+
+    // Write struct declaration
+    writer.Write("public ");
+    if (elementType is CsPointerType or CsSimplePointerType) {
+      writer.Write("unsafe ");
+    }
+    writer.Write("struct ");
+    writer.Write(name);
+
+    // Write struct body
+    writer.WriteLine(" {");
+    writer.Indent++;
+    writer.Write("private ");
+    writer.Write(elementTypeName);
+    writer.WriteLine(" _element0;");
+    writer.Indent--;
+    writer.WriteLine('}');
+    writer.WriteLine();
   }
 }

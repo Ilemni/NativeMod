@@ -118,23 +118,33 @@ public sealed partial class SourceGen : IDisposable {
 
     // Force loading of lazy-loaded props
     // If anything throws, we'll know before letting the program do IO.
-    foreach (CsUdt csUdt in CsUdts.Values) {
-      _ = csUdt.SelfName;
+    foreach (CsType? csType in CsTypes) {
+      if (csType is null) {
+        continue;
+      }
+      _ = csType.FullName;
 
-      if (csUdt is CsStructure csStruct) {
-        _ = csStruct.BaseClasses;
-        _ = csStruct.NestedClasses;
-        foreach (CsInstanceField f in csStruct.InstanceFields) {
-          _ = f.FieldType;
-        }
+      switch (csType) {
+        case CsStructure csStruct: {
+          _ = csStruct.BaseClasses;
+          _ = csStruct.NestedClasses;
+          foreach (CsInstanceField f in csStruct.InstanceFields) {
+            _ = f.FieldType;
+          }
 
-        foreach (CsStaticField f in csStruct.StaticFields) {
-          _ = f.FieldType;
-        }
+          foreach (CsStaticField f in csStruct.StaticFields) {
+            _ = f.FieldType;
+          }
 
-        foreach (CsInstanceMethod m in csStruct.InstanceMethods) {
-          _ = m.ParameterTypes;
+          foreach (CsInstanceMethod m in csStruct.InstanceMethods) {
+            _ = m.ParameterTypes;
+          }
+
+          break;
         }
+        case CsArray csArray:
+          _ = csArray.InnerElement;
+          break;
       }
     }
 
