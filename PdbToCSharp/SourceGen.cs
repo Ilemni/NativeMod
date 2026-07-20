@@ -122,6 +122,7 @@ public sealed partial class SourceGen : IDisposable {
       if (csType is null) {
         continue;
       }
+
       _ = csType.FullName;
 
       switch (csType) {
@@ -150,8 +151,9 @@ public sealed partial class SourceGen : IDisposable {
 
     Log.Step("Merging namespaces into types with the same name");
     var rootTypes = CsUdts.Values.Where(c => c.Parent is null).ToArray();
+    var potentialParents = rootTypes.OfType<CsStructure>().ToArray();
     foreach (CsUdt potentialChild in rootTypes.Where(c => c.Namespace is not null)) {
-      foreach (CsStructure potentialParent in rootTypes.OfType<CsStructure>()) {
+      foreach (CsStructure potentialParent in potentialParents) {
         if (ReferenceEquals(potentialParent, potentialChild)) {
           continue;
         }
@@ -170,10 +172,10 @@ public sealed partial class SourceGen : IDisposable {
     WriteGlobals();
     _writers.CreateModuleFile();
 
-    Log.Step("Writing all other types... ");
+    Log.Step("Writing all other types");
     HashSet<TypeIndex> created = [];
     HashSet<string> duplicateNames = [];
-    Dictionary<string, Dictionary<string, CsUdt>> addedClassesByNamespace = [];
+    Dictionary<string, Dictionary<string, CsStructure>> addedClassesByNamespace = [];
     Dictionary<string, Dictionary<string, CsEnum>> addedEnumsByNamespace = [];
 
     Dictionary<string, HashSet<CsUdt>> duplicates = [];
@@ -181,15 +183,6 @@ public sealed partial class SourceGen : IDisposable {
       var h = CollectionsMarshal.GetValueRefOrAddDefault(duplicates, udt.FullyQualifiedName, out bool _) ??= [];
       h.Add(udt);
     }
-
-    var dups = duplicates.Where(v => v.Value.Count > 1).OrderBy(v => v.Key).ToArray();
-
-    // var ims = CsUdts
-    //   .Select(s => (s.Value,
-    //     (s.Value as CsStructure)?.InstanceMethods
-    //     .Where(m => m.MethodRecord.Options.HasFlag(FunctionOptions.Constructor)).ToArray()))
-    //   .Where(t => t.Item2 is { Length: > 0 })
-    //   .ToArray();
 
     foreach (CsUdt udt in CsUdts.Values.Where(u => u.Parent is null)
                .DistinctBy(u => u.TypeIndex)
@@ -202,44 +195,36 @@ public sealed partial class SourceGen : IDisposable {
 
       switch (udt) {
         case CsEnum csEnum: {
-          if (CheckDuplicateName(csEnum, addedEnumsByNamespace)) {
-            IndentedTextWriter writer = _writers.GetMatching(csEnum);
-            WriteEnumType(csEnum, writer);
-          }
-
+          WriteIfNotDuplicate(csEnum, addedEnumsByNamespace, WriteEnumType);
           break;
         }
         case CsStructure csStructure: {
-          if (CheckDuplicateName(csStructure, addedClassesByNamespace)) {
-            IndentedTextWriter writer = _writers.GetMatching(csStructure);
-            WriteStruct(csStructure, writer);
-          }
-
+          WriteIfNotDuplicate(csStructure, addedClassesByNamespace, WriteStruct);
           break;
         }
       }
     }
+  }
 
-    return;
-
-    static bool CheckDuplicateName<T>(T udt, Dictionary<string, Dictionary<string, T>> dict) where T : CsUdt {
-      string fullName = udt.Namespace is { } ns
-        ? ns + '.' + udt.FullName
-        : udt.FullName;
-      if (!dict.TryGetValue(fullName, out var nsDict)) {
-        nsDict = [];
-        dict[fullName] = nsDict;
-      }
-      else {
-        if (!nsDict.TryAdd(fullName, udt)) {
-          // TODO: find a way to do proper de-duplicating
-          // Log.Warn($"Duplicate class name \"{udt.FullName}\" in namespace \"{udt.Namespace}\".");
-          return false;
-        }
-      }
-
-      return true;
+  private void WriteIfNotDuplicate<T>(T udt, Dictionary<string, Dictionary<string, T>> dict,
+    Action<T, IndentedTextWriter> writeAction) where T : CsUdt {
+    string fullName = udt.Namespace is { } ns
+      ? ns + '.' + udt.FullName
+      : udt.FullName;
+    if (!dict.TryGetValue(fullName, out var nsDict)) {
+      nsDict = [];
+      dict[fullName] = nsDict;
     }
+    else {
+      if (!nsDict.TryAdd(fullName, udt)) {
+        // TODO: find a way to do proper de-duplicating
+        // Log.Warn($"Duplicate class name \"{udt.FullName}\" in namespace \"{udt.Namespace}\".");
+        return;
+      }
+    }
+
+    IndentedTextWriter writer = _writers.GetMatching(udt);
+    writeAction(udt, writer);
   }
 
   private void WriteGlobals() {
