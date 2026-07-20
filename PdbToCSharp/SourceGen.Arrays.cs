@@ -57,19 +57,28 @@ public sealed partial class SourceGen {
     CsType inner = arr.InnerElement;
     if (inner is CsPointerType or CsSimplePointerType) {
       // Write notice that this must be cast to pointer
+      writer.Write("/// <br /> NOTE! ");
       if (isPtr) {
-        writer.Write("/// NOTE! The element type ");
+        writer.Write("The element type ");
         writer.WriteXmlDocText(elementTypeName);
       }
       else {
-        writer.Write("/// NOTE! The inner element type");
+        writer.Write("The inner element type");
       }
-      writer.Write(" must be cast to a pointer of type ");
+
+      writer.Write(" must be cast to a pointer. Cast to ");
       if (inner.Namespace is { } ns) {
         writer.WriteXmlDocText(ns);
         writer.Write('.');
       }
-      writer.WriteXmlDocTextLine(inner.FullName);
+
+      writer.WriteXmlDocText(inner.FullName);
+      if (inner is not CsSimplePointerType) {
+        // SimplePointerType already has a * in the name
+        writer.Write('*');
+      }
+
+      writer.WriteLine();
     }
 
     // GeneratedCode attribute
@@ -85,6 +94,7 @@ public sealed partial class SourceGen {
     if (elementType is CsPointerType or CsSimplePointerType) {
       writer.Write("unsafe ");
     }
+
     writer.Write("struct ");
     writer.Write(name);
 
