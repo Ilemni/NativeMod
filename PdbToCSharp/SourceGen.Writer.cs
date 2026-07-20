@@ -32,10 +32,7 @@ public partial class SourceGen {
 
     // public [unsafe] partial struct [@]StructName {
     writer.Write("public ");
-    if (csStruct.InstanceFields.Any(f => f.FieldType is CsPointerType or CsSimplePointerType)) {
-      writer.Write("unsafe ");
-    }
-
+    writer.WriteIf("unsafe ", csStruct.IsUnsafe);
     writer.Write("partial struct ");
 
     // Handle warning CS8981: The type name only contains lower-cased ascii characters.
@@ -52,7 +49,8 @@ public partial class SourceGen {
     WritePointers(csStruct, writer);
 
     VirtualFunctionTableShapeRecord? vfTable = csStruct.FindVfTable(out CsStructure? vfTableHolder);
-    if (csStruct.InstanceMethods.Length > 0 && (csStruct is not { VfAddress: 0, VfTable: null } || vfTable is not null)) {
+    if (csStruct.InstanceMethods.Length > 0 &&
+        (csStruct is not { VfAddress: 0, VfTable: null } || vfTable is not null)) {
       writer.WriteLine(vfTable is not null
         ? "/// Pointer to the virtual function table (vtable) of this struct."
         : "// Warning: VfAddress is non-zero but VfTable is null");
@@ -292,47 +290,7 @@ public partial class SourceGen {
     writer.Indent++;
 
     if (vfTable is not null) {
-      int highestVirtualIndex = csStruct.InstanceMethods.Select(m => m.Record.VFTableOffset).Max() / 8;
-      bool isLargerThanVfTable = highestVirtualIndex >= vfTable.Slots.Length;
-      if (isLargerThanVfTable) {
-        Log.Warn($"VfTable for {csStruct.SelfName} has {vfTable.Slots.Length} slots, but highest virtual index is {highestVirtualIndex}");
-      }
-
-      int numSlots = Math.Max(vfTable.Slots.Length, highestVirtualIndex + 1);
-
-      // Write InlineArray type for this VTable
-      writer.Write("[System.Runtime.CompilerServices.InlineArray(");
-      writer.Write(numSlots);
-      writer.WriteLine(")]");
-      writer.WriteLine("public struct VTable {");
-      writer.Indent++;
-      writer.WriteLine("private ulong _slot0;");
-      writer.Indent--;
-      writer.WriteLine("}");
-
-      writer.Write("/// Pointer to the virtual function table (vtable) of ");
-      if (vfTableHolder is not null) {
-        writer.Write("the base class ");
-        writer.WriteXmlDocText(vfTableHolder.Record.Name.String);
-        writer.WriteXmlDocLinebreak();
-        writer.Write("TypeIndex: ");
-        writer.WriteXmlDocText(vfTableHolder.TypeIndex.ToString());
-      }
-      else {
-        writer.Write("this struct ");
-        writer.WriteXmlDocText(csStruct.Record.Name.String);
-        writer.WriteXmlDocLinebreak();
-        writer.Write("TypeIndex: ");
-        writer.WriteXmlDocText(csStruct.TypeIndex.ToString());
-      }
-      writer.WriteLine();
-      writer.Write("public static readonly unsafe VTable* vTable = (VTable*)(");
-      writer.Write(csStruct.SourceGen.MemoryAddressFieldName);
-      writer.Write(" + ");
-      writer.Write(csStruct.VfAddress);
-      writer.Write(");");
-      writer.WriteIf("// Missing VfTable address", csStruct.VfAddress == 0);
-      writer.WriteLine();
+      WriteVTable(csStruct, writer);
     }
 
     foreach (CsInstanceMethod m in csStruct.InstanceMethods.Where(m => m.ProcedureInfo is not null)) {
@@ -341,18 +299,14 @@ public partial class SourceGen {
         continue;
       }
 
-      if (m.DelegateFieldName.Contains("operator")) {
-        continue;
-      }
-
       // public static readonly unsafe delegate* unmanaged[CallConv]<T1, T2, ..., TResult>
       // MethodName = (delegate* unmanaged[CallConv]<T1, T2, ..., TResult>)(FunctionAddress + Offset);
       writer.Write("public static readonly unsafe ");
-      WriteDelegateType(csStruct, writer, m);
+      WriteDelegateType(m, writer);
       writer.Write(" ");
       writer.Write(m.DelegateFieldName);
       writer.Write(" = (");
-      WriteDelegateType(csStruct, writer, m);
+      WriteDelegateType(m, writer);
       writer.Write(")(");
       writer.Write(csStruct.SourceGen.FunctionAddressFieldName);
       writer.Write(" + ");
@@ -362,6 +316,54 @@ public partial class SourceGen {
 
     writer.Indent--;
     writer.WriteLine("}");
+  }
+
+  private static void WriteVTable(CsStructure csStruct, IndentedTextWriter writer) {
+    VirtualFunctionTableShapeRecord vfTable = csStruct.FindVfTable(out CsStructure? vfTableHolder)!;
+    int highestVirtualIndex = csStruct.InstanceMethods.Select(m => m.Record.VFTableOffset).Max() / 8;
+    int vfSlots = vfTable.Slots.Length;
+    bool isLargerThanVfTable = highestVirtualIndex >= vfSlots;
+    if (isLargerThanVfTable) {
+      // string name = csStruct.SelfName;
+      // Log.Warn($"VfTable for {name} has {vfSlots} slots, but highest virtual index is {highestVirtualIndex}");
+    }
+
+    int numSlots = Math.Max(vfSlots, highestVirtualIndex + 1);
+
+    // Write InlineArray type for this VTable
+    writer.Write("[System.Runtime.CompilerServices.InlineArray(");
+    writer.Write(numSlots);
+    writer.WriteLine(")]");
+    writer.WriteLine("public struct VTable {");
+    writer.Indent++;
+    writer.WriteLine("private ulong _slot0;");
+    writer.Indent--;
+    writer.WriteLine("}");
+
+    writer.Write("/// Pointer to the virtual function table (vtable) of ");
+    if (vfTableHolder is not null) {
+      writer.Write("the base class ");
+      writer.WriteXmlDocText(vfTableHolder.Record.Name.String);
+      writer.WriteXmlDocLinebreak();
+      writer.Write("TypeIndex: ");
+      writer.WriteXmlDocText(vfTableHolder.TypeIndex.ToString());
+    }
+    else {
+      writer.Write("this struct ");
+      writer.WriteXmlDocText(csStruct.Record.Name.String);
+      writer.WriteXmlDocLinebreak();
+      writer.Write("TypeIndex: ");
+      writer.WriteXmlDocText(csStruct.TypeIndex.ToString());
+    }
+
+    writer.WriteLine();
+    writer.Write("public static readonly unsafe VTable* vTable = (VTable*)(");
+    writer.Write(csStruct.SourceGen.MemoryAddressFieldName);
+    writer.Write(" + ");
+    writer.Write(csStruct.VfAddress);
+    writer.Write(");");
+    writer.WriteIf("// Missing VfTable address", csStruct.VfAddress == 0);
+    writer.WriteLine();
   }
 
   private static void WriteBaseClasses(CsStructure csStruct, IndentedTextWriter writer) {
@@ -405,7 +407,7 @@ public partial class SourceGen {
     // TODO: Move static methods out of here (ideally out of CsStructure.InstanceMethods)
     //  Do we even have any static methods here?
     writer.WriteLine("#region Instance Methods");
-    foreach (CsInstanceMethod method in csStruct.InstanceMethods.Distinct(CsInstanceMethod.Comparer.Instance)) {
+    foreach (CsInstanceMethod method in csStruct.InstanceMethods.Distinct()) {
       int vfOffset = method.Record.VFTableOffset;
       if (method.ProcedureInfo is null && vfOffset == -1) {
         continue;
@@ -415,22 +417,26 @@ public partial class SourceGen {
         continue;
       }
 
-      if (method.Name.Contains("operator")) {
+      if (method.Name.StartsWith("operator")) {
+        if (method.ProcedureInfo is not null) {
+          WriteOperator(method, writer);
+        }
+
         continue;
       }
 
       if (vfOffset == -1) {
-        WriteMethod(csStruct, writer, method);
+        WriteMethod(method, writer);
       }
       else {
-        WriteVirtualMethod(csStruct, writer, method);
+        WriteVirtualMethod(method, writer);
       }
     }
 
     writer.WriteLine("#endregion");
   }
 
-  private static void WriteMethod(CsStructure csStruct, IndentedTextWriter writer, CsInstanceMethod method) {
+  private static void WriteMethod(CsInstanceMethod method, IndentedTextWriter writer) {
     // public [static] unsafe <T|void*> MethodName([T arg1][, T arg2] ...) {
     writer.Write("public ");
     writer.WriteIf("static ", method.IsStatic);
@@ -458,46 +464,13 @@ public partial class SourceGen {
 
     writer.WriteLine(") {");
     writer.Indent++;
-
-    // fixed ([T]* pThis = &this) {
-    writer.Write("fixed (");
-    writer.Write(csStruct.FullyQualifiedName);
-    writer.Write("* pThis = &this) {");
-    writer.WriteLine();
-    writer.Indent++;
-
-    // [return] Pointers.MethodName([pThis][, arg1] ...]);
-    if (method.ReturnType.SelfName != "void") {
-      writer.Write("return ");
-    }
-
-    writer.Write("Pointers.");
-    writer.Write(method.DelegateFieldName);
-    writer.Write("(");
-
-    if (!method.IsStatic) {
-      writer.Write("pThis");
-      if (method.ParameterTypes.Length > 0) {
-        writer.Write(", ");
-      }
-    }
-
-    foreach ((int i, string name) in method.Args.Index()) {
-      if (i > 0) {
-        writer.Write(", ");
-      }
-
-      writer.Write(name);
-    }
-
-    writer.WriteLine(");");
-    writer.Indent--;
-    writer.WriteLine("}");
+    WriteFixedMethodBody(method, writer);
     writer.Indent--;
     writer.WriteLine("}");
   }
 
-  private static void WriteVirtualMethod(CsStructure csStruct, IndentedTextWriter writer, CsInstanceMethod method) {
+  private static void WriteVirtualMethod(CsInstanceMethod method, IndentedTextWriter writer) {
+    CsStructure csStruct = method.Container;
     // public [static] unsafe <T|void*> MethodName([T arg1][, T arg2] ...) {
     writer.Write("public ");
     writer.WriteIf("static ", method.IsStatic);
@@ -533,9 +506,9 @@ public partial class SourceGen {
     writer.WriteLine();
     writer.Indent++;
 
-    writer.WriteIf("return ", method.ReturnType.SelfName != "void");
+    writer.WriteIf("return ", method.HasReturnType);
     writer.Write("((");
-    WriteDelegateType(csStruct, writer, method);
+    WriteDelegateType(method, writer);
     writer.Write(")(*vTable)[");
     writer.Write(method.Record.VFTableOffset / 8);
     writer.Write("])(");
@@ -563,7 +536,8 @@ public partial class SourceGen {
     writer.WriteLine("}");
   }
 
-  private static void WriteDelegateType(CsStructure csStruct, IndentedTextWriter writer, CsInstanceMethod method) {
+  private static void WriteDelegateType(CsInstanceMethod method, IndentedTextWriter writer) {
+    CsStructure csStruct = method.Container;
     writer.Write("delegate* unmanaged[");
     string conv = method.CallingConvention switch {
       CallingConvention.NearC => "Cdecl",
@@ -671,5 +645,120 @@ public partial class SourceGen {
     writer.Indent--;
     writer.WriteLine("}");
     writer.WriteLine();
+  }
+
+  /// <summary>
+  /// Writes out the native operator overload template and/or the fallback method format using IndentedTextWriter.
+  /// </summary>
+  private static void WriteOperator(CsInstanceMethod method, IndentedTextWriter writer) {
+    string mName = method.Name;
+    if (!mName.StartsWith("operator") || method.ProcedureInfo?.Procedure is null) {
+      return;
+    }
+
+    var opType = mName.AsSpan(8);
+    if (opType is "[]") {
+      // We can write an indexer instead of an operator. Write it here.
+      writer.Write("/// Indexer operator for operator []");
+      writer.WriteLine();
+
+      // If any member is named "Item", we have to apply IndexerNameAttribute to the indexer.
+      CsStructure csStruct = method.Container;
+      if (csStruct.InstanceMethods.Any(m => m.Name == "Item") ||
+          csStruct.NestedClasses.Any(n => n.SelfName == "Item")) {
+        writer.Write("[System.Runtime.CompilerServices.IndexerName(\"");
+        writer.Write(method.DelegateFieldName);
+        writer.WriteLine("\")]");
+      }
+
+      writer.Write("public unsafe ");
+      writer.Write(method.ReturnType.FullyQualifiedName);
+      writer.Write(" this[");
+      (CsType arg1Type, string arg1Name) = method.Parameters[0];
+      writer.Write(arg1Type.FullyQualifiedName);
+      writer.Write(' ');
+      writer.Write(arg1Name);
+      writer.Write(']');
+      writer.WriteLine(" {");
+      writer.Indent++;
+      writer.WriteLine("get {");
+      writer.Indent++;
+      WriteFixedMethodBody(method, writer);
+      writer.Indent--;
+      writer.WriteLine("}");
+      writer.Indent--;
+      writer.WriteLine("}");
+      // writer.WriteLine();
+      // writer.Write(" => throw new global::System.NotImplementedException();");
+      writer.WriteLine();
+      return;
+    }
+
+    // TODO: Implement operators as actual operators.
+    writer.Write("/// Operator overload for ");
+    writer.WriteXmlDocTextLine(mName);
+    writer.Write("public unsafe ");
+    writer.Write(method.ReturnType.FullyQualifiedName);
+    writer.Write(' ');
+    writer.Write(method.DelegateFieldName);
+    writer.Write('(');
+    for (int i = 0; i < method.Parameters.Length; i++) {
+      if (i > 0) {
+        writer.Write(", ");
+      }
+
+      (CsType argType, string argName) = method.Parameters[i];
+      writer.Write(argType.FullyQualifiedName);
+      writer.Write(' ');
+      writer.Write(argName);
+    }
+
+    writer.WriteLine(") {");
+    writer.Indent++;
+    WriteFixedMethodBody(method, writer);
+    writer.Indent--;
+    writer.WriteLine('}');
+  }
+
+  private static void WriteFixedMethodBody(CsInstanceMethod method, IndentedTextWriter writer) {
+    string[] args = method.Args;
+    if (!method.IsStatic) {
+      // fixed ([T]* pThis = &this) {
+      writer.Write("fixed (");
+      writer.Write(method.Container.FullyQualifiedName);
+      writer.Write("* pThis = &this) {");
+      writer.WriteLine();
+      writer.Indent++;
+    }
+
+    // [return] Pointers.DelegateFieldName([pThis][, arg1] ...]);
+    writer.WriteIf("return ", method.HasReturnType);
+    writer.Write("Pointers.");
+    writer.Write(method.DelegateFieldName);
+    writer.Write('(');
+
+    // this ptr, if instance method
+    if (!method.IsStatic) {
+      writer.Write("pThis");
+      if (args.Length > 0) {
+        writer.Write(", ");
+      }
+    }
+
+    // write args
+    for (int i = 0; i < args.Length; i++) {
+      if (i != 0) {
+        writer.Write(", ");
+      }
+
+      writer.Write(args[i]);
+    }
+
+    writer.WriteLine(");");
+
+    if (!method.IsStatic) {
+      writer.Indent--;
+      writer.WriteLine("}");
+    }
   }
 }
