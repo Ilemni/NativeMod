@@ -9,7 +9,7 @@ using SharpPdb.Windows.TypeRecords;
 
 namespace PdbToCSharp.Types;
 
-public abstract class CsType(SourceGen sourceGen, TypeIndex index, ModifierOptions modifiers) {
+public abstract class CsType(SourceGen sourceGen, TypeIndex index, ModifierOptions modifiers) : IEquatable<CsType> {
   public readonly TypeIndex TypeIndex = index;
   public readonly ModifierOptions Modifiers = modifiers;
 
@@ -35,8 +35,6 @@ public abstract class CsType(SourceGen sourceGen, TypeIndex index, ModifierOptio
 
   protected abstract string CreateSelfName();
   protected virtual string CreateFullName() => SelfName;
-
-  public sealed override int GetHashCode() => (int)TypeIndex.Index;
 
   private string ValidateName(string name, bool isSelfName) {
     if (this is CsFunctionType or CsPointerType or CsSimplePointerType or CsArray) {
@@ -139,8 +137,6 @@ public abstract class CsType(SourceGen sourceGen, TypeIndex index, ModifierOptio
     return result;
   }
 
-  public override string ToString() => FullName;
-
   protected string QualifyWithGlobal() {
     string fullName = FullName;
     string result = "global::" +
@@ -149,6 +145,14 @@ public abstract class CsType(SourceGen sourceGen, TypeIndex index, ModifierOptio
       fullName;
     return result;
   }
+
+  public override string ToString() => FullName;
+
+  public sealed override bool Equals(object? obj) => Equals(obj as CsType);
+
+  public abstract bool Equals(CsType? other);
+
+  public abstract override int GetHashCode();
 }
 
 public sealed class CsSimpleType(SourceGen sourceGen, TypeIndex index, ModifierOptions modifiers)
@@ -222,6 +226,12 @@ public sealed class CsSimpleType(SourceGen sourceGen, TypeIndex index, ModifierO
     SimpleTypeKind.Boolean128 => nameof(CppBoolean128),
     _ => throw new ArgumentOutOfRangeException(nameof(index))
   };
+
+  public override bool Equals(CsType? other) {
+    return other is CsSimpleType otherSimple && TypeIndex == otherSimple.TypeIndex;
+  }
+
+  public override int GetHashCode() => TypeIndex.GetHashCode();
 }
 
 public sealed class CsSimplePointerType(SourceGen sourceGen, TypeIndex index, ModifierOptions modifiers)
@@ -239,6 +249,12 @@ public sealed class CsSimplePointerType(SourceGen sourceGen, TypeIndex index, Mo
   }
 
   private ulong? _size;
+
+  public override bool Equals(CsType? other) {
+    return other is CsSimplePointerType otherPointer && TypeIndex == otherPointer.TypeIndex;
+  }
+
+  public override int GetHashCode() => TypeIndex.GetHashCode();
 }
 
 public sealed class CsPointerType : CsType {
@@ -281,18 +297,26 @@ public sealed class CsPointerType : CsType {
     }
   }
 
-  // TODO: use correct number of '*' in name
   public override string? Namespace => ElementType.Namespace;
   public override string FullyQualifiedName => ElementType.FullyQualifiedName + "*";
 
-  public override string ToString() => $"pointer to {ElementType.FullName}";
-  protected override string CreateSelfName() => $"{ElementType.SelfName}*";
+  public override string ToString() => $"Pointer to {ElementType.FullName} ({ElementType.TypeIndex}) Depth: {Depth}";
+  protected override string CreateSelfName() => $"{ElementType.SelfName}";
 
   public override ulong Size => PointerRecord.Size != 0
     ? PointerRecord.Size
     : PointerRecord.PointerKind == PointerKind.Near64
       ? 8U
       : 4U;
+
+
+  public override bool Equals(CsType? other) {
+    return other is CsPointerType otherPointer &&
+      Depth == otherPointer.Depth &&
+      InnerElement.Equals(otherPointer.InnerElement);
+  }
+
+  public override int GetHashCode() => HashCode.Combine(Depth, InnerElement);
 }
 
 public abstract class CsUdt(TypeIndex index, SourceGen sourceGen, TagRecord record, ModifierOptions modifiers)
@@ -455,6 +479,8 @@ public abstract class CsStructure : CsUdt {
   public CsInstanceMethod[] InstanceMethods => field ??= GetInstanceMethods();
   public CsStaticField[] StaticFields => field ??= GetStaticFields();
 
+  public bool IsUnsafe => InstanceFields.Any(f => f.FieldType is CsPointerType or CsSimplePointerType);
+
   private CsBaseClass[] GetBaseClasses() {
     int count = AllFields.OfType<BaseClassRecord>().Count();
     var result = new CsBaseClass[count];
@@ -605,6 +631,12 @@ public sealed class CsStruct(ClassRecord record, TypeIndex index, SourceGen sour
   public override string ToString() => Parent is null
     ? $"struct {FullName}"
     : $"struct {FullName} ({SelfName})";
+
+  public override bool Equals(CsType? other) {
+    return other is CsStruct otherStruct && TypeIndex == otherStruct.TypeIndex;
+  }
+
+  public override int GetHashCode() => TypeIndex.GetHashCode();
 }
 
 public sealed class CsUnion(UnionRecord record, TypeIndex index, SourceGen sourceGen, ModifierOptions modifiers)
@@ -616,6 +648,12 @@ public sealed class CsUnion(UnionRecord record, TypeIndex index, SourceGen sourc
   public override string ToString() => Parent is null
     ? $"union {FullName}"
     : $"union {FullName} ({SelfName})";
+
+  public override bool Equals(CsType? other) {
+    return other is CsUnion otherUnion && TypeIndex == otherUnion.TypeIndex;
+  }
+
+  public override int GetHashCode() => TypeIndex.GetHashCode();
 }
 
 public sealed class CsEnum : CsUdt {
@@ -640,6 +678,12 @@ public sealed class CsEnum : CsUdt {
 
   [DebuggerBrowsable(DebuggerBrowsableState.RootHidden)]
   public readonly CsEnumField[] Values;
+
+  public override bool Equals(CsType? other) {
+    return other is CsEnum otherEnum && TypeIndex == otherEnum.TypeIndex;
+  }
+
+  public override int GetHashCode() => TypeIndex.GetHashCode();
 }
 
 public sealed class CsEnumField(EnumeratorRecord record) {
@@ -658,6 +702,17 @@ public sealed class CsArray(ArrayRecord record, TypeIndex index, SourceGen sourc
   public override ulong Size => Record.Size;
 
   public override string FullyQualifiedName => field ??= QualifyWithGlobal();
+
+  public CsType InnerElement {
+    get {
+      CsType current = ElementType;
+      while (current is CsArray array) {
+        current = array.ElementType;
+      }
+
+      return current;
+    }
+  }
 
   public override string ToString() => $"Array of {ElementType} [{Count}]";
 
@@ -678,6 +733,14 @@ public sealed class CsArray(ArrayRecord record, TypeIndex index, SourceGen sourc
     string result = start + elementName + end;
     return result;
   }
+
+  public override bool Equals(CsType? other) {
+    return other is CsArray otherArray &&
+      Count == otherArray.Count &&
+      ElementType.Equals(otherArray.ElementType);
+  }
+
+  public override int GetHashCode() => HashCode.Combine(Count, InnerElement);
 }
 
 public class CsInstanceField(CsStructure container, DataMemberRecord record) {
@@ -838,7 +901,8 @@ public sealed class CsInstanceMethod : CsType {
       Name = "Dtor";
     }
 
-    DelegateFieldName = (OverloadId > 0 ? $"{Name}_{OverloadId}" : Name)
+    string delegateName = Name;
+    DelegateFieldName = (OverloadId > 0 ? $"{delegateName}_{OverloadId}" : delegateName)
       .SanitizeName(true, true)
       .KeywordToVerbatim();
 
@@ -887,12 +951,16 @@ public sealed class CsInstanceMethod : CsType {
   public override ulong Size => 0;
 
   public CsType ReturnType => field ??= GetOrCreate(Container.SourceGen, MethodRecord.ReturnType);
+  public bool HasReturnType => ReturnType is not CsSimpleType { SelfName: "void" };
 
   public CsType[] ParameterTypes => field ??= MethodRecord.ArgumentList.As<ArgumentListRecord>(Container.PdbFile)
     .Arguments.Select(p => GetOrCreate(Container.SourceGen, p)).ToArray();
 
   public (CsType type, string name)[] Parameters =>
     field ??= ParameterTypes.Zip(Args, (type, name) => (type, name)).ToArray();
+
+  public bool IsUnsafe => ParameterTypes.Any(p => p is CsPointerType or CsSimplePointerType) ||
+    ReturnType is CsPointerType or CsSimplePointerType;
 
   [DebuggerBrowsable(DebuggerBrowsableState.Never)]
   private string? _toStringValue;
@@ -936,39 +1004,98 @@ public sealed class CsInstanceMethod : CsType {
     return $"{access}{@sealed}{virt}{ret} {Name}({args}){vfOffset}{rva}";
   }
 
+  public override bool Equals(CsType? other) {
+    return other is CsInstanceMethod otherMethod && Equals(otherMethod);
+  }
+
   public bool Equals(CsInstanceMethod? other) {
     if (ReferenceEquals(this, other)) return true;
     if (other is null) return false;
     if (TypeIndex == other.TypeIndex) return true;
 
     return
-      Container.TypeIndex == other.Container.TypeIndex &&
+      Container.Equals(other.Container) &&
       Name == other.Name &&
-      ParameterTypes.Select(p => p.TypeIndex).SequenceEqual(
-        other.ParameterTypes.Select(p => p.TypeIndex));
+      ParameterTypes.SequenceEqual(other.ParameterTypes);
   }
 
-  public class Comparer : IEqualityComparer<CsInstanceMethod> {
-    public static readonly Comparer Instance = new();
-
-    public bool Equals(CsInstanceMethod? x, CsInstanceMethod? y) {
-      if (ReferenceEquals(x, y)) return true;
-      if (x is null || y is null) return false;
-
-      return x.Equals(y);
+  public override int GetHashCode() {
+    HashCode hash = new();
+    hash.Add(Container);
+    hash.Add(Name);
+    foreach (CsType param in ParameterTypes) {
+      hash.Add(param);
     }
 
-    public int GetHashCode(CsInstanceMethod obj) {
-      HashCode hash = new();
-      hash.Add(obj.Container.TypeIndex);
-      hash.Add(obj.Name);
-      foreach (CsType param in obj.ParameterTypes) {
-        hash.Add(param.TypeIndex);
-      }
-
-      return hash.ToHashCode();
-    }
+    return hash.ToHashCode();
   }
+
+  public static readonly Dictionary<string, string> Operators = new() {
+    // Assignment
+    ["operator="] = "OperatorAssign",
+    ["operator+="] = "OperatorAddAssign",
+    ["operator-="] = "OperatorSubtractAssign",
+    ["operator*="] = "OperatorMultiplyAssign",
+    ["operator/="] = "OperatorDivideAssign",
+    ["operator%="] = "OperatorModuloAssign",
+    ["operator&="] = "OperatorBitwiseAndAssign",
+    ["operator|="] = "OperatorBitwiseOrAssign",
+    ["operator^="] = "OperatorBitwiseXorAssign",
+    ["operator<<="] = "OperatorLeftShiftAssign",
+    ["operator>>="] = "OperatorRightShiftAssign",
+
+    // Arithmetic
+    ["operator+"] = "OperatorAdd",
+    ["operator-"] = "OperatorSubtract",
+    ["operator*"] = "OperatorMultiply",
+    ["operator/"] = "OperatorDivide",
+    ["operator%"] = "OperatorModulo",
+
+    // Increment/Decrement
+    ["operator++"] = "OperatorIncrement",
+    ["operator--"] = "OperatorDecrement",
+
+    // Comparison
+    ["operator=="] = "OperatorEquals",
+    ["operator!="] = "OperatorNotEquals",
+    ["operator<"] = "OperatorLessThan",
+    ["operator>"] = "OperatorGreaterThan",
+    ["operator<="] = "OperatorLessThanOrEqual",
+    ["operator>="] = "OperatorGreaterThanOrEqual",
+    ["operator<=>"] = "OperatorSpaceship",
+
+    // Logical
+    ["operator!"] = "OperatorLogicalNot",
+    ["operator&&"] = "OperatorLogicalAnd",
+    ["operator||"] = "OperatorLogicalOr",
+
+    // Bitwise
+    ["operator~"] = "OperatorBitwiseNot",
+    ["operator&"] = "OperatorBitwiseAnd",
+    ["operator|"] = "OperatorBitwiseOr",
+    ["operator^"] = "OperatorBitwiseXor",
+    ["operator<<"] = "OperatorLeftShift",
+    ["operator>>"] = "OperatorRightShift",
+
+    // Member and Pointer Access
+    ["operator[]"] = "OperatorIndex",
+    // ["operator*"] = "OperatorDereference", // This seems to actually be "operator MyType *"
+    ["operator->"] = "OperatorMemberAccess",
+    ["operator->*"] = "OperatorMemberPointerAccess",
+
+    // Function Call and Comma
+    ["operator()"] = "OperatorFunctionCall",
+    ["operator,"] = "OperatorComma",
+
+    // Memory Management
+    ["operator new"] = "OperatorNew",
+    ["operator new[]"] = "OperatorNewArray",
+    ["operator delete"] = "OperatorDelete",
+    ["operator delete[]"] = "OperatorDeleteArray",
+
+    // User-Defined Literals
+    ["operator\"\""] = "OperatorLiteral"
+  };
 }
 
 public sealed class CsFunctionType(
@@ -1008,6 +1135,22 @@ public sealed class CsFunctionType(
   }
 
   public override string ToString() => SelfName;
+
+  public override bool Equals(CsType? other) {
+    return other is CsFunctionType otherFunc &&
+      ReturnType.Equals(otherFunc.ReturnType) &&
+      Arguments.SequenceEqual(otherFunc.Arguments);
+  }
+
+  public override int GetHashCode() {
+    HashCode hash = new();
+    hash.Add(ReturnType);
+    foreach (CsType arg in Arguments) {
+      hash.Add(arg);
+    }
+
+    return hash.ToHashCode();
+  }
 }
 
 public sealed class CsBaseClass(CsStructure container, BaseClassRecord record) {
