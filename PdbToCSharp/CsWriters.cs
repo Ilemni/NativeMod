@@ -219,28 +219,30 @@ internal sealed class CsWriters(SourceGen sourceGen, string outputPath, string n
 
     // 4 byte char values
     using CppChar32 = uint;
-
-    using CppInt8 = sbyte;
-    using CppUInt8 = byte;
-
-    // 2 byte integer values
-    using CppInt16 = short;
-    using CppUInt16 = ushort;
-    using CppInt16Short = short;
-    using CppUInt16Short = ushort;
-
-    // 4 byte integer values
-    using CppInt32 = int;
-    using CppUInt32 = uint;
-    using CppInt32Long = int;
-    using CppUInt32Long = uint;
-
-    // 8 byte integer values
-    using CppInt64 = long;
-    using CppUInt64 = ulong;
-    using CppInt64Quad = long;
-    using CppUInt64Quad = ulong;
-
+    """ +
+//     """
+//     using CppInt8 = sbyte;
+//     using CppUInt8 = byte;
+//
+//     // 2 byte integer values
+//     using CppInt16 = short;
+//     using CppUInt16 = ushort;
+//     using CppInt16Short = short;
+//     using CppUInt16Short = ushort;
+//
+//     // 4 byte integer values
+//     using CppInt32 = int;
+//     using CppUInt32 = uint;
+//     using CppInt32Long = int;
+//     using CppUInt32Long = uint;
+//
+//     // 8 byte integer values
+//     using CppInt64 = long;
+//     using CppUInt64 = ulong;
+//     using CppInt64Quad = long;
+//     using CppUInt64Quad = ulong;
+//     """ +
+    """
     // 16 byte integer values
     using CppInt128 = System.Int128;
     using CppUInt128 = System.UInt128;

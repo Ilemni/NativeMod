@@ -12,26 +12,26 @@ global using CppWideChar = ushort;
 // 4 byte char values
 global using CppChar32 = uint;
 
-global using CppInt8 = sbyte;
-global using CppUInt8 = byte;
+// global using CppInt8 = sbyte;
+// global using CppUInt8 = byte;
 
 // 2 byte integer values
-global using CppInt16 = short;
-global using CppUInt16 = ushort;
-global using CppInt16Short = short;
-global using CppUInt16Short = ushort;
+// global using CppInt16 = short;
+// global using CppUInt16 = ushort;
+// global using CppInt16Short = short;
+// global using CppUInt16Short = ushort;
 
 // 4 byte integer values
-global using CppInt32 = int;
-global using CppUInt32 = uint;
-global using CppInt32Long = int;
-global using CppUInt32Long = uint;
+// global using CppInt32 = int;
+// global using CppUInt32 = uint;
+// global using CppInt32Long = int;
+// global using CppUInt32Long = uint;
 
 // 8 byte integer values
-global using CppInt64 = long;
-global using CppUInt64 = ulong;
-global using CppInt64Quad = long;
-global using CppUInt64Quad = ulong;
+// global using CppInt64 = long;
+// global using CppUInt64 = ulong;
+// global using CppInt64Quad = long;
+// global using CppUInt64Quad = ulong;
 
 // 16 byte integer values
 global using CppInt128 = System.Int128;

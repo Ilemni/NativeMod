@@ -1517,8 +1517,8 @@ public static class CsNameUndecorator {
     'C' => nameof(CppSignedChar), // signed char
     'D' => nameof(CppChar), // char
     'E' => nameof(CppUnsignedChar), // unsigned char
-    'F' => nameof(CppInt16Short), // short
-    'G' => nameof(CppUInt16Short), // unsigned short
+    'F' => "short", // short
+    'G' => "ushort", // unsigned short
     'H' => "short", // int
     'I' => "ushort", // unsigned int
     'J' => "int", // long
@@ -1532,14 +1532,14 @@ public static class CsNameUndecorator {
   };
 
   private static string? GetExtendedType(char c) => c switch {
-    'D' => nameof(CppInt8), // __int8,
-    'E' => nameof(CppUInt8), // unsigned __int8,
-    'F' => nameof(CppInt16), // __int16,
-    'G' => nameof(CppUInt16), // unsigned __int16,
-    'H' => nameof(CppInt32), // __int32,
-    'I' => nameof(CppUInt32), // unsigned __int32,
-    'J' => nameof(CppInt64), // __int64,
-    'K' => nameof(CppUInt64), // unsigned __int64,
+    'D' => "sbyte", // __int8,
+    'E' => "byte", // unsigned __int8,
+    'F' => "short", // __int16,
+    'G' => "ushort", // unsigned __int16,
+    'H' => "int", // __int32,
+    'I' => "uint", // unsigned __int32,
+    'J' => "long", // __int64,
+    'K' => "ulong", // unsigned __int64,
     'L' => nameof(CppInt128), // __int128,
     'M' => nameof(CppUInt128), // unsigned __int128,
     'N' => "bool", // bool
