@@ -83,17 +83,17 @@ public sealed partial class SourceGen : IDisposable {
       .ToArray();
 
     Log.Step("Creating non-forward reference types");
-    Parallel.ForEach(_tagRecords.Where(r => !r.tag.IsForwardReference),
-      iter => { CsType.GetOrCreate(this, iter.index); });
+    foreach ((TagRecord _, TypeIndex index) in _tagRecords.Where(r => !r.tag.IsForwardReference)) {
+      CsType.GetOrCreate(this, index);
+    }
 
     Log.Step("Resolving forward references");
-    Parallel.ForEach(_tagRecords.Index().Where(r => r.Item.tag.IsForwardReference), iter => {
-      (TagRecord tag, TypeIndex i) = iter.Item;
-
-      CsTypes[i.ArrayIndex] = ResolveForwardReference(tag, iter.Index, out TypeIndex rIndex)
+    // replace below parallel.foreach with regular foreach
+    foreach ((int index, (TagRecord tag, TypeIndex i)) in _tagRecords.Index().Where(r => r.Item.tag.IsForwardReference)) {
+      CsTypes[i.ArrayIndex] = ResolveForwardReference(tag, index, out TypeIndex rIndex)
         ? CsTypes[rIndex.ArrayIndex]!
         : CsType.GetOrCreate(this, i);
-    });
+    }
 
     // Cannot use Paralle.ForEach to assign to dictionary
     foreach ((int i, CsUdt udt) in CsTypes.Index().Where(r => r.Item is CsUdt).Select(r => (r.Index, (CsUdt)r.Item!))) {
@@ -108,13 +108,13 @@ public sealed partial class SourceGen : IDisposable {
       .Where(p => p.Record.Options.HasFlag(ClassOptions.ContainsNestedClass))
       .Select(p => (parent: p, p.Record.GetFields(Pdb).OfType<NestedTypeRecord>()));
 
-    Parallel.ForEach(nestedIter, iter => {
+    foreach (var iter in nestedIter) {
       foreach (NestedTypeRecord nested in iter.Item2) {
         if (CsUdts.TryGetValue(nested.Type, out CsUdt? nestedCs) && nestedCs.Record.IsNested) {
           nestedCs.SetParent(iter.parent, nested);
         }
       }
-    });
+    }
 
     // Force loading of lazy-loaded props
     // If anything throws, we'll know before letting the program do IO.
