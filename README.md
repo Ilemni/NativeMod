@@ -26,7 +26,7 @@ For this example, the namespace is assumed to be `MyGame`
 
 | Path | Description |
 | -------- | ------- |
-| NativeMod/ | Contains types used for hooking, and to store the memory address for all functions and static fields |
+| NativeMod/ | Contains types used for hooking, and to store the .exe's memory address which all functions and static fields use |
 | MyGame/GlobalFields.cs | Contains all global fields in type MyGame.Globals<br/> - This type is a struct for easier debug inspection. |
 | MyGame/GlobalFunctions.cs | Contains all global functions. <br/> - Functions full names look like `MyGame.GlobalFunctions.Path.To.File.Function()`<br/> - `Path.To.File` is the path for the original .cpp implementation<br/> - Functions with paths not easily resolved are all put in `GlobalFunctions.Functions`<br/> - Functions that lack a path (internal to C++(?)) are in `GlobalFunctions.Internals` |
 | MyGame/Types/ | Contains all struct, union, and enum definitions <br/> - Files are split by namespace, or by base type |
