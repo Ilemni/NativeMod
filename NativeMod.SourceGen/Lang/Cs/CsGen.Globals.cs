@@ -12,7 +12,7 @@ public sealed partial class CsGen {
       return;
     }
 
-    Log.Step("Writing Global Fields");
+    Log.Info("Writing Global Fields");
     Writer writer = Writers.GlobalsWriter;
 
     writer.WriteLine("/// <summary>");
@@ -174,7 +174,7 @@ public sealed partial class CsGen {
 
     var gProcs = NestGraph.Create(fileNames);
     if (gProcs.HasAny) {
-      Log.Step("Writing Global Functions");
+      Log.Info("Writing Global Functions");
       WriteGlobalFunctionsClass(gProcs, Writers.GlobalFunctionsWriter);
       if (WriteHooks) {
         WriteGlobalFunctionFileHooks(gProcs, Writers);

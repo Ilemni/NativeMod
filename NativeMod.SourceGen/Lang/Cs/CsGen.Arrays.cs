@@ -12,7 +12,7 @@ public sealed partial class CsGen {
       return;
     }
 
-    Log.Step("Writing inline array types");
+    Log.Info("Writing inline array types");
     IndentedTextWriter writer = Writers.InlineArrayWriter;
     // We are using pointers in many of the inline arrays
 

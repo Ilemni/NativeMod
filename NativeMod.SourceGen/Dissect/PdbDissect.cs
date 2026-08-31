@@ -19,17 +19,17 @@ internal static class PdbDissect {
     string output = $"output/dissect/{pdbName}_";
     Directory.CreateDirectory("output/dissect");
 
-    Log.Step($"Dissecting {pdbPath}");
+    Log.Info($"Dissecting {pdbPath}");
     using PdbFileReader pdbReader = new(pdbPath);
     PdbFile pdb = pdbReader.PdbFile;
     CsGen gen = CsGen.CreateDebugGen(pdbReader);
     pdb.FixNulls();
 
-    Log.Step("Writing TNode_d.txt");
+    Log.Info("Writing TNode_d.txt");
     WriteTNodeD(output + "TNode_d.txt", pdbReader, gen);
 
     return;
-    // Log.Step($"Writing functions.txt");
+    // Log.Info($"Writing functions.txt");
     // using (StreamWriter debugWriter = new(output + "functions.txt")) {
     //   HashSet<string> funcNames = [];
     //   const Flags flags =
@@ -76,7 +76,7 @@ internal static class PdbDissect {
 
     // Everything below this point is for debugging and analysis of the PDB file
 
-    // Log.Step("Writing functions2.txt");
+    // Log.Info("Writing functions2.txt");
     // using (StreamWriter funcWriter = new(output + "functions2.txt")) {
     //   // var syms = pdbReader.PublicSymbols
     //   //   .Select(s => (s.RelativeVirtualAddress, s.GetUndecoratedName()))
@@ -105,23 +105,23 @@ internal static class PdbDissect {
     //   }
     // }
 
-    // Log.Step("Fetching TPI records");
+    // Log.Info("Fetching TPI records");
     // var tpiRecords = pdb.TpiStream.GetTypeRecords();
 
-    Log.Step("Fetching IPI records");
+    Log.Info("Fetching IPI records");
     var ipiRecords = pdb.IpiStream.GetTypeRecords();
 
-    Log.Step("Writing globals.txt");
+    Log.Info("Writing globals.txt");
     WriteGlobals(output + "globals.txt", pdb);
 
-    Log.Step("Writing locals.txt");
+    Log.Info("Writing locals.txt");
     WriteLocals(output + "locals.txt", pdb);
 
-    // Log.Step("Writing statics.txt");
+    // Log.Info("Writing statics.txt");
     // WriteStatics(output + "statics.txt", pdbReader);
 
 
-    // Log.Step("Writing tpi.txt");
+    // Log.Info("Writing tpi.txt");
     // using (IndentedTextWriter writer = new(new StreamWriter(output + "tpi.txt"))) {
     //   foreach (TypeRecord typeRecord in tpiRecords) {
     //     writer.Write(typeRecord.Kind);
@@ -131,7 +131,7 @@ internal static class PdbDissect {
     //   }
     // }
 
-    Log.Step("Writing ipi.txt");
+    Log.Info("Writing ipi.txt");
     using (IndentedTextWriter writer = new(new StreamWriter(output + "ipi.txt"))) {
       foreach (TypeRecord typeRecord in ipiRecords) {
         writer.Write(typeRecord.Kind);
@@ -141,7 +141,7 @@ internal static class PdbDissect {
       }
     }
 
-    Log.Step("Writing ipi_src.txt");
+    Log.Info("Writing ipi_src.txt");
     WriteIpiSrc(output + "ipi_src.txt", ipiRecords, pdb);
 
     // These below variables are for inspecting into via debug.
@@ -169,7 +169,7 @@ internal static class PdbDissect {
       }
     }
 
-    // Log.Step("Writing pdb headers");
+    // Log.Info("Writing pdb headers");
     // WritePdbHeaders(pdbName, pdb);
 
     // Debug list of types that exist in the PDB, to get an idea of what we're working with and identify any unhandled types
@@ -192,7 +192,7 @@ internal static class PdbDissect {
     var orderedModuleTypes = GetModuleSymbolTypeCounts(pdb).OrderBy(kv => kv.Key.Kind).ThenBy(kv => kv.Value).ToArray();
 
 
-    // Log.Step("Writing args.txt");
+    // Log.Info("Writing args.txt");
     // using (IndentedTextWriter writer = new(new StreamWriter(output + "args.txt"))) {
     //   var argDict = BuildArgumentDictionary(pdb);
     //   foreach ((ProcedureSymbol key, var value) in argDict.OrderBy(kvp => kvp.Key.FunctionType.Index)) {
@@ -203,7 +203,7 @@ internal static class PdbDissect {
     // }
 
     // WriteCppHeader(output + ".h", pdb, tpiRecords);
-    // Log.Step("Writing template_names.txt");
+    // Log.Info("Writing template_names.txt");
     // WriteTemplateNames(output + "template_names.txt", tpiRecords);
 
     Log.Step("Done.");

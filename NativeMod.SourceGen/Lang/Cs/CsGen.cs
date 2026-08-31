@@ -21,7 +21,7 @@ public sealed partial class CsGen : LangGen {
     namespaceName, bindsPath, nativeModPath) {
     Types = new CsType[pdb.PdbFile.TpiStream.TypeRecordCount];
     Writers = new CsWriters(this);
-    Log.Step("Fixing symbols");
+    Log.Info("Fixing symbols");
     Pdb.FixNulls();
     Records = Pdb.TpiStream.GetTypeRecords();
     WriteHooks = true;
@@ -30,7 +30,7 @@ public sealed partial class CsGen : LangGen {
   /// For debug/dissect purposes only
   private CsGen(PdbFileReader pdb) : base(pdb, null!, null!, null!) {
     Types = new CsType[pdb.PdbFile.TpiStream.TypeRecordCount];
-    Log.Step("Fixing symbols");
+    Log.Info("Fixing symbols");
     Pdb.FixNulls();
     Records = Pdb.TpiStream.GetTypeRecords();
   }
@@ -134,7 +134,7 @@ public sealed partial class CsGen : LangGen {
       }
     }
 
-    Log.Step("Setting parents for all nested types");
+    Log.Info("Setting parents for all nested types");
     var nestedIter = Types.OfType<CsStructure>().Distinct()
       .Where(p => p.Record.Options.HasFlag(ClassOptions.ContainsNestedClass))
       .Select(p => (parent: p, p.Record.FieldList.As<FieldListRecord>(Pdb).Fields.OfType<NestedTypeRecord>()));
@@ -185,7 +185,7 @@ public sealed partial class CsGen : LangGen {
       }
     }
 
-    Log.Step("Merging namespaces into types with the same name");
+    Log.Info("Merging namespaces into types with the same name");
     var potentialParents = Types.OfType<CsStructure>().Distinct().OrderBy(p => p.IsForwardReference).ToArray();
     var potentialChildren = Types.OfType<CsUdt>().Distinct()
       .Where(c => c.Parent is null && c.Namespace is not null)
@@ -227,7 +227,7 @@ public sealed partial class CsGen : LangGen {
     WriteNativeModHookClasses();
     PopulateUdts();
 
-    Log.Step("Writing all other types");
+    Log.Info("Writing all other types");
     HashSet<TypeIndex> created = [];
     HashSet<string> duplicateNames = [];
     Dictionary<string, Dictionary<string, CsStructure>> addedClassesByNamespace = [];

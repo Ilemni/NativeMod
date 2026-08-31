@@ -1,4 +1,5 @@
-﻿using System.Globalization;
+﻿using System.Diagnostics;
+using System.Globalization;
 using JetBrains.Annotations;
 using NativeMod.SourceGen.Lang;
 using SharpPdb.Native;
@@ -83,17 +84,21 @@ internal static class Program {
     namespaceName = namespaceName.KeywordToVerbatim();
     PdbFileReader reader = new(pdbPath);
 
+    Stopwatch sw = Stopwatch.StartNew();
     LangGen gen = CreateLangGen(lang, reader, namespaceName, bindsPath, nativeModPath);
     Log.Step("Pre-processing PDB");
     gen.PreProcess();
+    Log.Step($"Pre-processing complete in {sw.Elapsed.TotalSeconds:F2} seconds. Found {gen.ProcCache.Count} procedures and {gen.Types?.Length ?? 0} types.");
+    double dt = sw.Elapsed.TotalSeconds;
 
     Log.Step("Writing all files");
     gen.WriteAll();
+    Log.Step($"Writing complete in {sw.Elapsed.TotalSeconds - dt:F2} seconds.");
 
     Log.Step("Cleaning up.");
     gen.Dispose();
 
-    Log.Step("Done.");
+    Log.Step($"Done. Elapsed time: {sw.Elapsed.TotalSeconds:F2} seconds.");
     return;
 
     static void EmptyDirectory(string path) {
@@ -114,7 +119,7 @@ internal static class Program {
     };
 
     LangGen result = genFunc(reader, ns, bindsPath, nativeModPath);
-    Log.Step($"Using Source Generator type: {result.GetType().Name}");
+    Log.Info($"Using Source Generator type: {result.GetType().Name}");
     return result;
   }
 

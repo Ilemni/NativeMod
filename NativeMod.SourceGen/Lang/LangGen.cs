@@ -31,24 +31,24 @@ public abstract class LangGen(PdbFileReader pdb, string namespaceName, string bi
   internal int UnnamedEnums;
 
   public virtual void PreProcess() {
-    Log.Step("Loading VTables");
+    Log.Info("Loading VTables");
     ProcessVTables();
 
-    Log.Step("Collecting tag records");
+    Log.Info("Collecting tag records");
     TagRecords = Records
       .Index()
       .Where(r => r.Item is TagRecord)
       .Select(r => ((TagRecord)r.Item, TypeIndex.FromArrayIndex(r.Index)))
       .ToArray();
 
-    Log.Step("Creating non-forward reference types");
+    Log.Info("Creating non-forward reference types");
     foreach ((int index, TypeRecord record) in Records.Index()) {
       if (record is TagRecord) {
         TryGetOrCreate(TypeIndex.FromArrayIndex(index));
       }
     }
 
-    Log.Step("Resolving forward references");
+    Log.Info("Resolving forward references");
     ResolveAllForwardReferences();
 
     foreach ((int index, TypeRecord record) in Records.Index()) {
@@ -57,7 +57,7 @@ public abstract class LangGen(PdbFileReader pdb, string namespaceName, string bi
       }
     }
 
-    Log.Step("Loading procedure info");
+    Log.Info("Loading procedure info");
     ProcessInstanceProcedureInfo();
   }
 
