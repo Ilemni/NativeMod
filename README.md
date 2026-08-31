@@ -54,6 +54,24 @@ Structs with virtual methods are supported, but not yet tested.
 
 ---
 
+## Hooks
+
+Both class methods and global functions are hooked. Hooks are stored paths similar to the original type or global function's full name.
+
+| Class/Global | Hook? | Path |
+| -------- | ------- |
+| Class | No | `MyGame.InnerNs.MyType.Foo()` |
+| Class | Yes | `On.MyGame.InnerNs.OnMyType.Foo` |
+| Global | No | `MyGame.GlobalFunctions.Path.To.File.Foo()` |
+| Global | Yes | `On.MyGame.GlobalFunctions.Path.To.On_File.Foo` |
+
+Hook types are a static class which have events for Prefix, Suffix, and the main Hook.
+- Prefixes do not use a return value.
+- Suffixes may modify the return value.
+- Hooks may modify arguments, the return value, and call the hooked C++ function 0 or more times.
+
+---
+
 ## Unimplemented features
 
 Many features that would be needed for a comfortable modding experience is missing.
