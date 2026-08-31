@@ -42,13 +42,12 @@ internal static class Program {
     if (pdbPath is null) {
       // Find the one .pdb file in the current directory
       // Disallow multiple .pdb files, as this is ambiguous
-      string[] pdbFiles = Directory.GetFiles(Directory.GetCurrentDirectory(), "*.pdb");
-      int numPdbs = pdbFiles.Length;
-      if (pdbFiles.Any(s => s.EndsWith("NativeMod.SourceGen.pdb"))) {
-        --numPdbs;
-      }
+      string[] pdbFiles = Directory
+        .GetFiles(Directory.GetCurrentDirectory(), "*.pdb")
+        .Where(f => !f.EndsWith("NativeMod.SourceGen.pdb", StringComparison.OrdinalIgnoreCase))
+        .ToArray();
 
-      switch (numPdbs) {
+      switch (pdbFiles.Length) {
         case 0:
           Console.WriteLine(
             "No .pdb file found in the current directory. Please specify a .pdb file using the -pdb argument.");
