@@ -112,7 +112,12 @@ public abstract class CsProcedureType : CsType {
     writer.WriteIf(ThisType.GlobalQualifiedName, !IsStatic, ref needsComma);
     writer.WriteCppParameterTypes(ParameterTypes, ref needsComma);
     writer.WriteCommaIfNeeded(ref needsComma);
-    writer.Write(!NeedsReturnBuffer ? ReturnType.GlobalQualifiedName : "void");
+    if (ReturnType.Marshaller is { } retMarshaller) {
+      writer.Write(retMarshaller.CppType);
+    }
+    else {
+      writer.Write(!NeedsReturnBuffer ? ReturnType.GlobalQualifiedName : "void");
+    }
     writer.Write('>');
     return writer.ToString();
   }

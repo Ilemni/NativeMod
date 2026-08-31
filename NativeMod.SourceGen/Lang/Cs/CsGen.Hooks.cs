@@ -337,6 +337,7 @@ public partial class CsGen {
     static void WriteCreateFirstHook(HookMethod m, IndentedTextWriter writer) {
       CsProcedureType proc = m.Procedure;
       (CsType, string) self = (proc.ThisType, "self");
+      CsMarshaller? retMarshaller = m.RetType.Marshaller;
 
       bool needsComma = true;
       writer.Write("CreateFirstHook = static trampoline => (");
@@ -357,6 +358,11 @@ public partial class CsGen {
         writer.WriteLine("{");
         writer.Indent++;
       }
+      else if (retMarshaller is not null) {
+        writer.WriteLine("{");
+        writer.Indent++;
+        writer.WriteMany(retMarshaller.CppType, " returnValue = ");
+      }
 
       writer.WriteMany("((", proc.DelegateType, ")trampoline)(");
       if (proc.NeedsReturnBuffer) {
@@ -367,9 +373,16 @@ public partial class CsGen {
       writer.WriteIf("self", m.HasThis, ref needsComma);
       writer.WriteParameterNamesToCpp(m.Args, ref needsComma);
       writer.Write(")");
-      writer.WriteLine(proc.NeedsReturnBuffer ? ';' : ',');
+      writer.WriteLine(proc.NeedsReturnBuffer || retMarshaller is not null ? ';' : ',');
 
       if (proc.NeedsReturnBuffer) {
+        writer.Indent--;
+        writer.WriteLine("},");
+      }
+      else if (retMarshaller is not null) {
+        writer.Write("return ");
+        retMarshaller.WriteFromCpp(writer, "returnValue");
+        writer.WriteLine(';');
         writer.Indent--;
         writer.WriteLine("},");
       }
@@ -401,6 +414,10 @@ public partial class CsGen {
 
       string retType = m.RetTypeName;
       string realRetType = m.RealRet ? retType : "void";
+
+      if (m.RealRet && m.RetType.Marshaller is { } retMarshaller) {
+        realRetType = retMarshaller.CppType;
+      }
 
       writer.WriteManyLine("[UnmanagedCallersOnly(CallConvs = [typeof(", m.CallConv, ")])]");
 
@@ -467,7 +484,11 @@ public partial class CsGen {
         #endregion
 
         writer.WriteLineIf("__returnBuffer = __oldReturnBuffer;", m.NeedsRetBuffer);
-        writer.WriteLineIf("return __return;", m.RealRet);
+        if (m.RealRet) {
+          writer.Write("return ");
+          m.RetType.WriteToCpp(writer, "__return");
+          writer.WriteLine(";");
+        }
 
         #endregion
       }

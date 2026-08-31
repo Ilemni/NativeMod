@@ -284,8 +284,10 @@ public sealed partial class CsGen {
   }
 
   private static void WriteGlobalFunction(Writer writer, HookMethod hookMethod, CsProcedureType csFunc, string outer) {
+    CsType ret = csFunc.ReturnType;
+    CsMarshaller? retMarshaller = ret.Marshaller;
     writer.Write("public static unsafe ");
-    writer.Write(csFunc.ReturnType.GlobalQualifiedName);
+    writer.Write(ret.GlobalQualifiedName);
     writer.Write(' ');
     writer.Write(hookMethod.Name);
     writer.WriteIf("_", hookMethod.Name == outer);
@@ -304,8 +306,13 @@ public sealed partial class CsGen {
       writer.WriteLine("{");
       writer.Indent++;
 
-      writer.Write(csFunc.ReturnType.GlobalQualifiedName);
+      writer.Write(ret.GlobalQualifiedName);
       writer.WriteLine(" retBuffer;");
+    }
+    else if (retMarshaller is not null) {
+      writer.WriteLine("{");
+      writer.Indent++;
+      writer.WriteManyLine(retMarshaller.CppType, " returnValue = ");
     }
     else {
       writer.Write("=> ");
@@ -320,6 +327,13 @@ public sealed partial class CsGen {
 
     if (csFunc.NeedsReturnBuffer) {
       writer.WriteLine("return retBuffer;");
+      writer.Indent--;
+      writer.WriteLine('}');
+    }
+    else if (retMarshaller is not null) {
+      writer.Write("return ");
+      retMarshaller.WriteFromCpp(writer, "returnValue");
+      writer.WriteLine(';');
       writer.Indent--;
       writer.WriteLine('}');
     }

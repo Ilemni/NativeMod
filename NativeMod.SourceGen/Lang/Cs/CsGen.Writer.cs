@@ -610,6 +610,7 @@ public sealed partial class CsGen {
     // public [static] unsafe <T|void*> MethodName([T arg1][, T arg2] ...) {
     CsMemberFunctionType mFunc = method.MemberFunction;
     string returnTypeName = mFunc.ReturnType.GlobalQualifiedName;
+    CsMarshaller? retMarshaller = mFunc.ReturnType.Marshaller;
 
     writer.Write("public ");
     writer.WriteIf("static ", mFunc.IsStatic);
@@ -621,11 +622,16 @@ public sealed partial class CsGen {
     writer.Write(")");
     using (writer.BracedScope()) {
       writer.WriteManyLineIf([returnTypeName, " returnBuffer;"], mFunc.NeedsReturnBuffer);
+      if (retMarshaller is not null) {
+        writer.Write(retMarshaller.CppType);
+        writer.WriteLine(" returnValue;");
+      }
 
       // fixed (<T>* pThis = &this) {
       string thisType = mFunc.ThisType.GlobalQualifiedName;
       writer.WriteMany("fixed (", thisType, " pThis = &this) ");
-      writer.WriteIf("return ", mFunc.HasRealReturn);
+      writer.WriteIf("return ", mFunc.HasRealReturn && retMarshaller is null);
+      writer.WriteIf("returnValue = ", retMarshaller is not null);
 
       writer.WriteMany("vTable->", method.DelegateFieldName);
       // string vfPos = (method.Record.VFTableOffset / 8).ToString();
@@ -641,6 +647,11 @@ public sealed partial class CsGen {
       writer.WriteParameterNamesToCpp(method.Parameters, ref needsComma);
       writer.WriteLine(");");
       writer.WriteLineIf("return returnBuffer;", mFunc.NeedsReturnBuffer);
+      if (retMarshaller is not null) {
+        writer.Write("return ");
+        retMarshaller.WriteFromCpp(writer, "returnValue");
+        writer.WriteLine(';');
+      }
     }
   }
 
@@ -714,9 +725,14 @@ public sealed partial class CsGen {
   private static void WriteFixedMethodBody(IndentedTextWriter writer, CsMethod method, bool isRefReturn = false) {
     CsMemberFunctionType mFunc = method.MemberFunction;
     // var returnBuffer;
+    CsType ret = mFunc.ReturnType;
+    CsMarshaller? retMarshaller = ret.Marshaller;
     if (mFunc.NeedsReturnBuffer) {
-      string retType = mFunc.ReturnType.GlobalQualifiedName;
+      string retType = ret.GlobalQualifiedName;
       writer.WriteMany(retType, " returnBuffer; ");
+    }
+    else if (retMarshaller is not null) {
+      writer.WriteMany(retMarshaller.CppType, " returnValue; ");
     }
 
     if (!mFunc.IsStatic) {
@@ -726,7 +742,8 @@ public sealed partial class CsGen {
     }
 
     // [return] Pointers.DelegateFieldName([returnBuffer, ][pThis][, arg1] ...]);
-    writer.WriteIf("return ", mFunc.HasRealReturn);
+    writer.WriteIf("return ", mFunc.HasRealReturn && ret.Marshaller is null);
+    writer.WriteIf("returnValue = ", retMarshaller is not null);
     writer.WriteIf("ref *", isRefReturn);
     writer.WriteMany("Pointers.", method.DelegateFieldName, "(");
 
@@ -738,6 +755,11 @@ public sealed partial class CsGen {
 
     if (mFunc.NeedsReturnBuffer) {
       writer.Write(" return returnBuffer;");
+    }
+    else if (retMarshaller is not null) {
+      writer.Write(" return ");
+      retMarshaller.WriteFromCpp(writer, "returnValue");
+      writer.Write(';');
     }
   }
 
