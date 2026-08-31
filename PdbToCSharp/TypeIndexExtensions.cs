@@ -1,4 +1,5 @@
 using System.Collections.ObjectModel;
+using System.Diagnostics.CodeAnalysis;
 using System.Diagnostics.Contracts;
 using PdbToCSharp.Dissect;
 using SharpPdb.Windows;
@@ -51,6 +52,42 @@ internal static class TypeIndexExtensions {
     public T As<T>(TpiStream stream) where T : TypeRecord {
       return stream[index] as T ??
         throw new ArgumentException($"Expected a {typeof(T).Name}, but got {stream[index].GetType().Name}");
+    }
+
+    [Pure]
+    public TypeRecord AsRecord(PdbFile pdb) => pdb.TpiStream[index];
+    [Pure]
+    public TypeRecord AsRecord(TpiStream stream) => stream[index];
+
+    [Pure]
+    public TypeRecord? TryAsRecord(PdbFile pdb) => !index.IsSimple && index.ArrayIndex < pdb.TpiStream.TypeRecordCount ? pdb.TpiStream[index] : null;
+    [Pure]
+    public TypeRecord? TryAsRecord(TpiStream stream) => !index.IsSimple && index.ArrayIndex < stream.TypeRecordCount ? stream[index] : null;
+
+    public T? TryAs<T>(PdbFile pdb) where T : TypeRecord {
+      return index.TryAs(pdb, out T? result) ? result : null;
+    }
+
+    [Pure]
+    public bool TryAs<T>(PdbFile pdb, [NotNullWhen(true)] out T? record) where T : TypeRecord {
+      if (!index.IsSimple) {
+        record = pdb.TpiStream[index] as T;
+        return record is not null;
+      }
+
+      record = null;
+      return false;
+    }
+
+    [Pure]
+    public bool TryAs<T>(TpiStream stream, [NotNullWhen(true)] out T? record) where T : TypeRecord {
+      if (!index.IsSimple) {
+        record = stream[index] as T;
+        return record is not null;
+      }
+
+      record = null;
+      return false;
     }
   }
 }

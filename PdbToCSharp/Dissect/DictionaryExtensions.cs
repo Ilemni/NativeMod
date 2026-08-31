@@ -1,6 +1,6 @@
 ﻿using System.Runtime.InteropServices;
 
-namespace PdbToCSharp;
+namespace PdbToCSharp.Dissect;
 
 internal static class DictionaryExtensions {
   extension<T>(Dictionary<T, int> dict) where T : notnull {

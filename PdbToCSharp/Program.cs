@@ -1,4 +1,7 @@
 ﻿using System.Globalization;
+using JetBrains.Annotations;
+using PdbToCSharp.Lang;
+using SharpPdb.Native;
 
 namespace PdbToCSharp;
 
@@ -10,6 +13,7 @@ internal static class Program {
     string? pdbPath = null;
     string? namespaceName = null;
     string? outputPath = null;
+    string? lang = null;
 
     if (args is ["help", ..]) {
       PrintHelp();
@@ -27,6 +31,9 @@ internal static class Program {
           break;
         case "-output":
           outputPath = args[++i];
+          break;
+        case "-lang":
+          lang = args[++i];
           break;
       }
     }
@@ -56,29 +63,81 @@ internal static class Program {
     }
 
     if (namespaceName is null) {
-      namespaceName = Path.GetFileNameWithoutExtension(pdbPath);
-      TextInfo textInfo = CultureInfo.InvariantCulture.TextInfo;
-      namespaceName = textInfo.ToTitleCase(namespaceName)
+      string pdbName = Path.GetFileNameWithoutExtension(pdbPath);
+      namespaceName = CultureInfo.InvariantCulture.TextInfo.ToTitleCase(pdbName)
         .Replace(" ", "")
         .Replace("-", "_");
+      if (!namespaceName.EndsWith("Game", StringComparison.OrdinalIgnoreCase)) {
+        namespaceName += "Game";
+      }
     }
 
-    outputPath ??= Path.Combine(Directory.GetCurrentDirectory(), "output", namespaceName);
+    outputPath = @"C:\Users\Twili\source\repos\MioBinds\MioBinds";
+    outputPath ??= Path.Combine(Directory.GetCurrentDirectory(), "output");
+    string bindsPath = Path.Combine(outputPath, namespaceName);
+    string nativeModPath = Path.Combine(outputPath, "NativeMod");
+    EmptyDirectory(bindsPath);
+    EmptyDirectory(nativeModPath);
+    lang ??= "cs";
 
-    // temp
-    namespaceName = "MioGame";
-    using SourceGen sourceGen = new(pdbPath, namespaceName, outputPath);
-    sourceGen.PdbToCSharp();
+    namespaceName = namespaceName.KeywordToVerbatim();
+    PdbFileReader reader = new(pdbPath);
+
+    SourceGen gen = CreateLangGen(lang, reader, namespaceName, bindsPath, nativeModPath);
+    Log.Step("Pre-processing PDB");
+    gen.PreProcess();
+
+    Log.Step("Writing all files");
+    gen.WriteAll();
+
+    Log.Step("Cleaning up.");
+    gen.Dispose();
+
+    Log.Step("Done.");
+    return;
+
+    static void EmptyDirectory(string path) {
+      if (Directory.Exists(path)) {
+        Directory.Delete(path, true);
+      }
+
+      Directory.CreateDirectory(path);
+    }
+  }
+
+  [MustDisposeResource]
+  private static SourceGen CreateLangGen(string lang, PdbFileReader reader, string ns, string bindsPath,
+    string nativeModPath) {
+    Func<PdbFileReader, string, string, string, SourceGen> genFunc = lang.ToLowerInvariant() switch {
+      "cs" or "csharp" => Lang.Cs.CsGen.CreateGen,
+      _ => throw new NotSupportedException($"Language '{lang}' is not supported.")
+    };
+
+    SourceGen result = genFunc(reader, ns, bindsPath, nativeModPath);
+    Log.Step($"Using Source Generator type: {result.GetType().Name}");
+    return result;
   }
 
   private static void PrintHelp() {
-    Console.WriteLine("Usage: PdbToCSharp [-pdb <path>] [-namespace <name>] [-output <path>]");
-    Console.WriteLine("  -pdb <path>       Path to the .pdb file to process.");
-    Console.WriteLine("                      If not specified, the program will look for exactly one .pdb file in the current directory.");
-    Console.WriteLine("  -namespace <name> Namespace name to use for the generated C# code.");
-    Console.WriteLine("                      If not specified, the program will use the .pdb file name,");
-    Console.WriteLine("                      formatted to PascalCase and invalid characters replaced with underscores.");
-    Console.WriteLine("  -output <path>    Output directory for the generated C# code.");
-    Console.WriteLine("                      If not specified, the program will create an 'output' directory in the current directory.");
+    Console.WriteLine(
+      """
+      Usage: PdbToCSharp [-pdb <path>] [-namespace <name>] [-output <path>] [-lang <language>]
+      -pdb <path>       Path to the .pdb file to process.
+                          If not specified, the program will look for
+                          exactly one .pdb file in the current directory.
+      -namespace <name> Namespace name to use for the generated code.
+                          If not specified, the program will use
+                          the .pdb file name formatted to PascalCase, with
+                          invalid characters replaced with underscores,
+                          and appended with \"Game\" if not already present.
+                          For example, \"foobar.pdb\" becomes FoobarGame
+      -output <path>    Output directory for the generated code.
+                          If not specified, the program will create an 
+                          'output' directory in the current directory.
+      -lang <path>      Language of the generated code.
+                          If not specified, the language will be C#.
+                          Currently, only C# code generation is supported
+      """
+    );
   }
 }

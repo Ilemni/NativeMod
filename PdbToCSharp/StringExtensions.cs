@@ -2,11 +2,25 @@
 
 namespace PdbToCSharp;
 
-internal static class SourceGenExtensions {
+internal static class StringExtensions {
   extension(string str) {
-    public string KeywordToVerbatim(bool checkNested = false) {
-      if (ReservedKeywords.Contains(str) || str.StartsWith("__")) {
-        return $"@{str}";
+    /// <summary>
+    /// Returns the string as a verbatim identifier if it is a reserved keyword or starts with "__".
+    /// If checkNested is true, it will also check for nested identifiers (e.g., "namespace.class")
+    /// and convert any reserved keywords in the nested identifiers to verbatim identifiers.
+    /// </summary>
+    /// <param name="checkNested">
+    /// Whether to check for nested identifiers and apply the replacement to them.
+    /// </param>
+    /// <param name="isType">
+    /// Whether the string represents a type name.
+    /// <br /> A fully lowercase type name is considered in need of a verbatim identifier, to avoid emitting CS8981.
+    /// </param>
+    /// <returns></returns>
+    /// <seealso cref="StringExtensions.ReservedKeywords"/>
+    public string KeywordToVerbatim(bool checkNested = false, bool isType = false) {
+      if (ReservedKeywords.Contains(str) || str.StartsWith("__") || isType && str.All(char.IsLower)) {
+        return '@' + str;
       }
 
       if (!checkNested || !str.Contains('.')) {
@@ -69,22 +83,22 @@ internal static class SourceGenExtensions {
       StringBuilder sb = new();
       bool pendingUnderscore = false;
       foreach (char c in strSpan[..^numPtrsOrRefs]) {
-        bool invalid = " ,<>()[]`'\\-&*$?".Contains(c);
-        bool isUnderscore = c == '_';
-        if (invalid) {
+        bool valid = !" ,<>()[]`'\\-&*$?:".Contains(c);
+        if (!valid) {
           pendingUnderscore = true;
+          continue;
         }
-        else {
-          if (pendingUnderscore) {
-            if (sb.Length > 0 || isUnderscore) {
-              sb.Append('_');
-            }
 
-            pendingUnderscore = false;
+        if (pendingUnderscore) {
+          // Don't start name with underscore unless the original name does
+          if (sb.Length > 0 || c is '_') {
+            sb.Append('_');
           }
 
-          sb.Append(c);
+          pendingUnderscore = false;
         }
+
+        sb.Append(c);
       }
 
       for (int i = 0; i < numPtrsOrRefs; i++) {
@@ -121,7 +135,6 @@ internal static class SourceGenExtensions {
         .Sanitize();
     }
   }
-
 
   private static readonly string[] ReservedKeywords = [
     "abstract",

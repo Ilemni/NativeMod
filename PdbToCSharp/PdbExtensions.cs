@@ -1,9 +1,7 @@
 ﻿using System.Collections;
-using System.Diagnostics.CodeAnalysis;
 using System.Runtime.CompilerServices;
-using SharpPdb.Native;
-using SharpPdb.Native.Types;
 using SharpPdb.Windows;
+using SharpPdb.Windows.DBI;
 using SharpPdb.Windows.SymbolRecords;
 using SharpPdb.Windows.TPI;
 using SharpPdb.Windows.TypeRecords;
@@ -12,79 +10,11 @@ using SharpUtilities;
 namespace PdbToCSharp;
 
 internal static class PdbExtensions {
-  extension(PdbFileReader reader) {
-    [UnsafeAccessor(UnsafeAccessorKind.Method, Name = "get_Item")]
-    public extern PdbType GetType(TypeIndex typeIndex);
-
-    public PdbType GetType(int index) => reader.GetType(new TypeIndex((uint)index + 4096));
-
-    public T? TryGetType<T>(TypeIndex index) where T : PdbType =>
-      reader.TryGetType(index, out T? type) ? type : null;
-
-    public bool TryGetType<T>(TypeIndex index, [NotNullWhen(true)] out T? type) where T : PdbType {
-      if (index.IsSimple) {
-        type = null;
-        return false;
-      }
-
-      type = reader.GetType(index) as T;
-      return type is not null;
-    }
-
-    public bool TryGetType<T>(int index, [NotNullWhen(true)] out T? type) where T : PdbType =>
-      reader.TryGetType(TypeIndex.FromArrayIndex(index), out type);
-
-    // ReSharper disable once InconsistentNaming
-    public IEnumerable<PdbUserDefinedType> UDTs => reader.UserDefinedTypes.Cast<PdbUserDefinedType>();
-
-
-    public PdbTypeEnumerable.PdbTypeEnumerator GetEnumerator() => new(reader);
-    public PdbTypeEnumerable AsEnumerable() => new(reader);
-    public PdbRecordEnumerable AsRecordEnumerable() => new(reader.PdbFile);
-  }
-
-  extension(PdbFile pdb) {
-    public TypeRecord GetRecord(TypeIndex typeIndex, TpiStream? stream = null) => (stream ?? pdb.TpiStream)[typeIndex];
-
-    public T GetRecord<T>(TypeIndex typeIndex, TpiStream? stream = null) where T : TypeRecord {
-      TypeRecord record = pdb.GetRecord(typeIndex, stream);
-      return record as T ??
-        throw new ArgumentException($"Expected a {typeof(T).Name}, but got {record.GetType().Name}");
-    }
-
-    public TypeRecord? TryGetRecord(TypeIndex typeIndex, TpiStream? stream = null) =>
-      !typeIndex.IsSimple ? pdb.GetRecord(typeIndex, stream) : null;
-
-    public T? TryGetRecord<T>(TypeIndex typeIndex, TpiStream? stream = null) where T : TypeRecord => pdb.TryGetRecord(typeIndex, stream) as T;
-  }
-
   extension(SymbolStream symbols) {
     [UnsafeAccessor(UnsafeAccessorKind.Field, Name = "symbols")]
     internal extern ref ArrayCache<SymbolRecord> GetSymbolsCache();
 
-    public SymbolStreamEnumerable.SymbolEnumerator GetEnumerator() => new(symbols);
-
     public SymbolStreamEnumerable AsEnumerable() => new(symbols);
-  }
-
-  public readonly ref struct PdbTypeEnumerable(PdbFileReader reader) : IEnumerable<PdbType> {
-    public PdbTypeEnumerator GetEnumerator() => new(reader);
-    IEnumerator<PdbType> IEnumerable<PdbType>.GetEnumerator() => GetEnumerator();
-    IEnumerator IEnumerable.GetEnumerator() => GetEnumerator();
-
-    public struct PdbTypeEnumerator(PdbFileReader reader) : IEnumerator<PdbType> {
-      private int _i;
-      public bool MoveNext() => ++_i < reader.PdbFile.TpiStream.TypeRecordCount;
-
-      public PdbType Current => reader.GetType(TypeIndex.FromArrayIndex(_i));
-
-      public void Reset() => _i = -1;
-      object? IEnumerator.Current => Current;
-
-      public void Dispose() {
-        throw new NotImplementedException();
-      }
-    }
   }
 
   public readonly struct SymbolStreamEnumerable(SymbolStream symbols) : IEnumerable<SymbolRecord> {
@@ -107,22 +37,101 @@ internal static class PdbExtensions {
     }
   }
 
-  public readonly struct PdbRecordEnumerable(PdbFile pdb) : IEnumerable<TypeRecord> {
-    public PdbRecordEnumerator GetEnumerator() => new(pdb);
-    IEnumerator<TypeRecord> IEnumerable<TypeRecord>.GetEnumerator() => GetEnumerator();
-    IEnumerator IEnumerable.GetEnumerator() => GetEnumerator();
-
-    public struct PdbRecordEnumerator(PdbFile pdb) : IEnumerator<TypeRecord> {
-      private int _i;
-      public bool MoveNext() => ++_i < pdb.TpiStream.TypeRecordCount;
-
-      public TypeRecord Current => pdb.TpiStream[TypeIndex.FromArrayIndex(_i)];
-
-      public void Reset() => _i = -1;
-      object? IEnumerator.Current => Current;
-
-      public void Dispose() {
+  extension(DbiModuleList modules) {
+    public IEnumerable<SymbolStream> GetStreams() {
+      foreach (DbiModuleDescriptor module in modules) {
+        if (module?.LocalSymbolStream is {} stream) {
+          yield return stream;
+        }
       }
+    }
+  }
+
+
+  extension(TpiStream tpi) {
+    internal TypeRecord[] GetTypeRecords() {
+      var records = new TypeRecord[tpi.TypeRecordCount];
+      uint count = (uint)tpi.TypeRecordCount + 4096U;
+      var cache = GetCache(tpi);
+      for (uint i = 0; i < tpi.TypeRecordCount; i++) {
+        uint index = i + 4096U;
+          TypeIndex typeIndex = new(index);
+        try {
+          records[i] = tpi[typeIndex];
+        }
+        catch (Exception ex) {
+          // Console.WriteLine(
+          //   $"{ex.GetType().Name} thrown while reading type record at index {index}/{count}: {ex.Message}");
+          NullRecord nullRecord = new();
+          records[i] = nullRecord;
+          cache[(int)typeIndex.ArrayIndex] = nullRecord;
+        }
+      }
+
+      return records;
+
+      [UnsafeAccessor(UnsafeAccessorKind.Field, Name = "typesCache")]
+      static extern ref ArrayCache<TypeRecord> GetCache(TpiStream stream);
+    }
+  }
+
+  extension(PdbFile pdb) {
+    public void FixNulls() {
+      pdb.ReplaceDbiNullSymbols();
+      pdb.FixNullDbiModuleStreams();
+      PdbFile.FixNullTpiStreams(pdb.TpiStream);
+      PdbFile.FixNullTpiStreams(pdb.IpiStream);
+    }
+
+    private static void FixNullTpiStreams(TpiStream stream) {
+      var cache = GetCache(stream);
+      for (uint i = 0; i < stream.TypeRecordCount; i++) {
+        uint index = i + 4096U;
+        TypeIndex typeIndex = new(index);
+        try {
+          _ = stream[typeIndex];
+        }
+        catch (Exception) {
+          cache[(int)typeIndex.ArrayIndex] = new NullRecord();
+        }
+      }
+
+      return;
+
+      [UnsafeAccessor(UnsafeAccessorKind.Field, Name = "typesCache")]
+      static extern ref ArrayCache<TypeRecord> GetCache(TpiStream stream);
+    }
+
+    /// Sets the LocalSymbolStream of each module to the PdbStream if it is not null.
+    /// <br /> This allows access to the <see cref="PdbFile"/> from any <see cref="SymbolRecord"/>.
+    private void FixNullDbiModuleStreams() {
+      PdbStream dbi = pdb.DbiStream.Stream;
+      foreach (DbiModuleDescriptor module in pdb.DbiStream.Modules) {
+        if (module.LocalSymbolStream is { } locals) {
+          SetStream(locals, dbi);
+        }
+      }
+
+      return;
+
+      [UnsafeAccessor(UnsafeAccessorKind.Method, Name = "set_Stream")]
+      static extern void SetStream(SymbolStream stream, PdbStream pdbStream);
+    }
+
+    /// Ensure all members not null
+    /// SymbolRecord.Children property WILL throw if any children are null
+    private void ReplaceDbiNullSymbols() {
+      var enumerable = pdb.DbiStream.Modules
+        .Select(m => m.LocalSymbolStream)
+        .Where(s => s is not null);
+      Parallel.ForEach(enumerable, mSymbols => {
+        var cache = mSymbols.GetSymbolsCache();
+        for (int i = 0; i < mSymbols.References.Count; i++) {
+          if (mSymbols[i] is null) {
+            cache[i] = new NullSymbol(mSymbols, i);
+          }
+        }
+      });
     }
   }
 }

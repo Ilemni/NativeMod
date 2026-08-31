@@ -1,5 +1,7 @@
-﻿using System.Text;
+﻿using System.CodeDom.Compiler;
+using System.Text;
 using SharpPdb.Windows;
+using SharpPdb.Windows.DBI;
 using SharpPdb.Windows.TypeRecords;
 
 // ReSharper disable MemberCanBePrivate.Global
@@ -8,403 +10,378 @@ using SharpPdb.Windows.TypeRecords;
 namespace PdbToCSharp.Dissect;
 
 internal static partial class TypeRecordExtensions {
-  public static string ToString(this ArgumentListRecord argumentList, PdbFile pdb) {
-    using var _ = Rent(out StringBuilder sb);
-    int len = argumentList.Arguments.Length;
-    for (int i = 0; i < len; i++) {
-      TypeIndex argument = argumentList.Arguments[i];
-      bool isNotLast = i != len - 1;
-
-      sb.Append(argument.ToString(pdb))
-        .Append(" param_")
-        .Append(i + 1)
-        .AppendIf(isNotLast, ", ");
+  extension(TextWriter writer) {
+    public void WriteRecord(ArgumentListRecord argumentList, PdbFile pdb) {
+      bool needsComma = false;
+      foreach (TypeIndex arg in argumentList.Arguments) {
+        writer.WriteCommaIfNeeded(ref needsComma);
+        writer.Write(arg.ToString(pdb));
+        needsComma = true;
+      }
     }
 
-    return sb.ToString();
-  }
-
-  // Cannot write the "[Count]" here, since it must come after the variable name, not available in this context.
-  public static string ToString(this ArrayRecord arrayRecord, PdbFile pdb) => arrayRecord.ElementType.ToString(pdb);
-
-  public static string ToString(this BaseClassRecord baseClassRecord, PdbFile pdb) {
-    using var _ = Rent(out StringBuilder sb);
-    MemberAccess access = baseClassRecord.Attributes.Access;
-    return access is MemberAccess.None
-      ? baseClassRecord.Type.ToString(pdb)
-      : sb
-        .Append(Enum.GetName(access)!.ToLower())
-        .Append(": ")
-        .Append(baseClassRecord.Type.ToString(pdb))
-        .ToString();
-  }
-
-  // Cannot write the ": Size" here, since it must come after the variable name, not available in this context
-  public static string ToString(this BitFieldRecord bitFieldRecord, PdbFile pdb) => bitFieldRecord.Type.ToString(pdb);
-
-  public static string ToString(this BuildInfoRecord buildInfoRecord, PdbFile pdb) {
-    using var _ = Rent(out StringBuilder sb);
-    sb.Append("/* Build Info: ")
-      .AppendLine("Indexes = {");
-    foreach (TypeIndex bType in buildInfoRecord.Indexes) {
-      StringIdRecord child = (StringIdRecord)pdb.IpiStream[bType];
-      sb.AppendLine($"    \"{child.String.String}\"");
+    public void WriteRecord(ArrayRecord arrayRecord, PdbFile pdb) {
+      writer.WriteMany(arrayRecord.ElementType.ToString(pdb), "[", arrayRecord.Size.ToString(), "]");
     }
 
-    return sb
-      .Append("} */")
-      .ToString();
-  }
+    public void WriteRecord(BaseClassRecord baseClassRecord, PdbFile pdb) {
+      if (baseClassRecord.Attributes.Access is var access and not MemberAccess.None) {
+        writer.WriteMany(typeof(MemberAccess).GetEnumName(access)!, ": ");
+      }
 
-  // ClassRecord handled by TagRecord
+      writer.Write(baseClassRecord.Type.ToString(pdb));
+    }
 
-  public static string ToString(this DataMemberRecord dataMemberRecord, PdbFile pdb) {
-    using var _ = Rent(out StringBuilder sb);
+    public void WriteRecord(BitFieldRecord bitFieldRecord, PdbFile pdb) {
+      writer.WriteMany(bitFieldRecord.Type.ToString(pdb), " : ", bitFieldRecord.BitOffset.ToString(), ":",
+        bitFieldRecord.BitSize.ToString());
+    }
 
-    sb.Append("/* offset = 0x")
-      .Append($"{dataMemberRecord.FieldOffset:X4}")
-      .Append(" */ ")
-      .Append(dataMemberRecord.Type.ToString(pdb))
-      .Append(' ')
-      .Append(dataMemberRecord.Name.String);
-    if (!dataMemberRecord.Type.IsSimple) {
-      TypeRecord t = pdb.GetRecord(dataMemberRecord.Type);
-      switch (t) {
+    public void WriteRecord(BuildInfoRecord buildInfoRecord, PdbFile pdb) {
+      writer.Write("Build Info: ");
+      IndentedTextWriter? iWriter = writer as IndentedTextWriter;
+      TextWriterExtensions.BracedIndent bracedScope = iWriter is not null ? iWriter.BracedScope() : default;
+      foreach (TypeIndex bType in buildInfoRecord.Indexes) {
+        StringIdRecord child = bType.As<StringIdRecord>(pdb.IpiStream);
+        writer.WriteLine($"\"{child.String.String}\"");
+      }
+
+      if (iWriter is not null) bracedScope.Dispose();
+    }
+
+    public void WriteRecord(DataMemberRecord data, PdbFile pdb) {
+      writer.Write("[Offset 0x");
+      writer.Write(data.FieldOffset.ToString("X4"));
+      writer.Write("] ");
+      writer.Write(data.Type.ToString(pdb));
+      writer.Write(' ');
+      writer.Write(data.Name.String);
+
+      switch (data.Type.TryAsRecord(pdb)) {
         case ArrayRecord arrayRecord:
-          sb.Append('[')
-            .Append(arrayRecord.Size)
-            .Append(']');
+          writer.Write('[');
+          writer.Write(arrayRecord.Size);
+          writer.Write(']');
           break;
         case BitFieldRecord bitFieldRecord:
-          sb.Append(" : ")
-            .Append(bitFieldRecord.BitSize);
+          writer.Write(" : ");
+          writer.Write(bitFieldRecord.BitSize);
           break;
       }
+
+      writer.Write(';');
     }
 
-    return sb
-      .Append(';')
-      .ToString();
-  }
+    public void WriteRecord(EnumeratorRecord e, PdbFile pdb) {
+      writer.WriteMany(
+        e.Name.String, " = ", e.Value.ToString()!,
+        $", /* 0x{e.Value:X8} */");
+    }
 
-  // EnumRecord handled by TagRecord
-
-  public static string ToString(this EnumeratorRecord enumeratorRecord, PdbFile pdb) {
-    using var _ = Rent(out StringBuilder sb);
-    return sb
-      .Append(enumeratorRecord.Name.String)
-      .Append(" = ")
-      .Append(enumeratorRecord.Value)
-      .Append(", /* 0x")
-      .Append($"{enumeratorRecord.Value:X8}")
-      .Append(" */")
-      .ToString();
-  }
-
-  public static string ToString(this FieldListRecord fieldListRecord, PdbFile pdb) {
-    using var _ = Rent(out StringBuilder sb);
-    foreach (TypeRecord field in fieldListRecord.Fields
-               .Where(f => f is not BaseClassRecord and not VirtualBaseClassRecord)) {
-      if (field is ListContinuationRecord listContinuationRecord) {
-        FieldListRecord listRecord = pdb.GetRecord<FieldListRecord>(listContinuationRecord.ContinuationIndex);
-        return sb
-          .Append(listRecord.ToString(pdb))
-          .ToString();
+    public void WriteRecord(FieldListRecord fieldListRecord, PdbFile pdb) {
+      writer.Write("Field List");
+      IndentedTextWriter? iWriter = writer as IndentedTextWriter;
+      TextWriterExtensions.BracedIndent bracedScope = iWriter is not null ? iWriter.BracedScope() : default;
+      foreach (TypeRecord field in fieldListRecord.Fields
+                 .Where(f => f is not BaseClassRecord and not VirtualBaseClassRecord)) {
+        writer.WriteLine();
+        writer.WriteRecord(field, pdb);
       }
 
-      string value = field.ToString(pdb);
-      sb.AppendLine()
-        .Append(value);
+      if (iWriter is not null) bracedScope.Dispose();
     }
 
-    return sb.ToString();
-  }
-
-  public static string ToString(this FunctionIdRecord functionIdRecord, PdbFile pdb) {
-    return
-      $"/* FunctionId: " +
-      $"Name = {functionIdRecord.Name.String} " +
-      $"Type = {functionIdRecord.FunctionType.ToString(pdb)} " +
-      $"ParentScope = {functionIdRecord.ParentScope.Index} " +
-      $"*/";
-  }
-
-  public static string ToString(this LabelRecord labelRecord, PdbFile pdb) {
-    return
-      $"/* Label: " +
-      $"Mode = {labelRecord.Mode} " +
-      $"*/";
-  }
-
-  public static string ToString(this ListContinuationRecord listContinuationRecord, PdbFile pdb) =>
-    pdb.GetRecord<FieldListRecord>(listContinuationRecord.ContinuationIndex).ToString(pdb);
-
-  public static string ToString(this MemberFunctionIdRecord memberFunctionIdRecord, PdbFile pdb) {
-    MemberFunctionRecord memberFunctionRecord = pdb.GetRecord<MemberFunctionRecord>(memberFunctionIdRecord.FunctionType);
-    return
-      $"/* MemberFunctionId: " +
-      $"Type = {memberFunctionRecord.ToString(pdb)}, " +
-      $"Name = {memberFunctionIdRecord.Name.String}, " +
-      $"*/";
-  }
-
-  public static string ToString(this MemberFunctionRecord memberFunctionRecord, PdbFile pdb) {
-    using var _ = Rent(out StringBuilder sb);
-    ushort paramsLeft = memberFunctionRecord.ParameterCount;
-    sb.Append("/* MEMPROC */ ");
-    bool isConstructor = memberFunctionRecord.Options.HasFlag(FunctionOptions.Constructor);
-    bool isStatic = memberFunctionRecord.ThisType is
-      { IsSimple: true, SimpleKind: SimpleTypeKind.None or SimpleTypeKind.Void };
-    if (isStatic) {
-      sb.Append("static ");
+    public void WriteRecord(FunctionIdRecord id, PdbFile pdb) {
+      writer.WriteMany(
+        "/* FunctionId:",
+        " Name = ", id.Name.String,
+        " Type = ", id.FunctionType.ToString(pdb),
+        " ParentScope = ", id.ParentScope.Index.ToString(),
+        " */");
     }
 
-    if (isConstructor) {
-      sb.Append("/* Ctor */ ");
-      // Return value is Void for constructors, but writing the class type is more informative
-      sb.Append(memberFunctionRecord.ClassType.ToString(pdb));
-    }
-    else {
-      sb.Append(memberFunctionRecord.ReturnType.ToString(pdb));
+    public void WriteRecord(LabelRecord labelRecord, PdbFile pdb) {
+      writer.WriteMany(
+        "/* Label:",
+        " Mode = ", labelRecord.Mode.ToString(),
+        " */");
     }
 
-    if (!isConstructor) {
-      sb.Append(' ');
-      string className = memberFunctionRecord.ClassType.ToString(pdb);
-      sb.Append(className);
-      if (!isConstructor) {
-        // sb.Append("::");
-        // sb.Append(procName.AsSpan()[(className.Length + 2)..]);
+    public void WriteRecord(ListContinuationRecord list, PdbFile pdb) {
+      writer.WriteRecord(list.ContinuationIndex.As<FieldListRecord>(pdb), pdb);
+    }
+
+    public void WriteRecord(MemberFunctionIdRecord mFuncId, PdbFile pdb) {
+      writer.WriteMany("/* MemberFunctionId: ",
+        mFuncId.ClassType.ToString(pdb), "::", mFuncId.Name.String,
+        " = ");
+      MemberFunctionRecord mFunc = mFuncId.FunctionType.As<MemberFunctionRecord>(pdb);
+      writer.WriteRecord(mFunc, pdb);
+      writer.Write(" */");
+    }
+
+    public void WriteRecord(MemberFunctionRecord mFunc, PdbFile pdb) {
+      bool isConstructor = mFunc.Options.HasFlag(FunctionOptions.Constructor);
+      bool isStatic = mFunc.ThisType is
+        { IsSimple: true, SimpleKind: SimpleTypeKind.None or SimpleTypeKind.Void };
+      bool hasRet = mFunc.ReturnType is not { IsSimple: true, SimpleKind: SimpleTypeKind.Void };
+      writer.Write("/* MPROC */ ");
+      writer.WriteIf("static ", isStatic);
+      writer.WriteIf("ctor ", isConstructor);
+      if (mFunc.ClassType.TryAsRecord(pdb) is { } cType) {
+        writer.WriteRecord(cType, pdb);
+      }
+      else {
+        writer.Write(mFunc.ClassType.ToString(pdb));
+      }
+
+      ArgumentListRecord args = mFunc.ArgumentList.As<ArgumentListRecord>(pdb);
+      writer.Write('(');
+      writer.WriteRecord(args, pdb);
+      writer.Write(')');
+      if (hasRet) {
+        writer.Write(" -> ");
+        if (mFunc.ReturnType.TryAsRecord(pdb) is { } rType) {
+          writer.WriteRecord(rType, pdb);
+        }
+        else {
+          writer.Write(mFunc.ReturnType.ToString(pdb));
+        }
       }
     }
 
-    ArgumentListRecord args = memberFunctionRecord.ArgumentList.As<ArgumentListRecord>(pdb);
-    sb.Append('(')
-      .Append(args.ToString(pdb))
-      .Append(')');
-
-    return sb.ToString();
-  }
-
-  public static string ToString(this MethodOverloadListRecord methodOverloadListRecord, PdbFile pdb) {
-    using var _ = Rent(out StringBuilder sb);
-    foreach (OneMethodRecord oneMethodRecord in methodOverloadListRecord.Methods) {
-      sb.AppendLine();
-      sb.Append(oneMethodRecord.ToString(pdb));
+    public void WriteRecord(MethodOverloadListRecord methodOverloadListRecord, PdbFile pdb, string overloadName) {
+      foreach (OneMethodRecord oneMethodRecord in methodOverloadListRecord.Methods) {
+        writer.WriteRecord(oneMethodRecord, pdb, overloadName);
+        writer.WriteLine();
+      }
     }
 
-    return sb.ToString();
-  }
-
-  public static string ToString(this ModifierRecord modifierRecord, PdbFile pdb) {
-    using var _ = Rent(out StringBuilder sb);
-    return sb
-      // commented out for C# code gen
-      // .AppendIf(modifierRecord.Modifiers.HasFlag(ModifierOptions.Const), "const ")
-      .AppendIf(modifierRecord.Modifiers.HasFlag(ModifierOptions.Volatile), "volatile ")
-      .Append(modifierRecord.ModifiedType.ToString(pdb))
-      .ToString();
-  }
-
-  public static string ToString(this NestedTypeRecord nestedTypeRecord, PdbFile pdb) {
-    using var _ = Rent(out StringBuilder sb);
-    if (nestedTypeRecord.Type.IsSimple) {
-      return sb.Append("/* Nested simple type: ")
-        .Append(nestedTypeRecord.Type.SimpleTypeName)
-        .Append(" */")
-        .ToString();
+    public void WriteRecord(ModifierRecord modifierRecord, PdbFile pdb) {
+      writer.WriteFlagIfHasFlag(modifierRecord.Modifiers, ModifierOptions.Const, '\0', ' ');
+      writer.WriteFlagIfHasFlag(modifierRecord.Modifiers, ModifierOptions.Volatile, '\0', ' ');
+      writer.WriteFlagIfHasFlag(modifierRecord.Modifiers, ModifierOptions.Unaligned, '\0', ' ');
+      if (modifierRecord.ModifiedType.TryAsRecord(pdb) is { } rType) {
+        writer.WriteRecord(rType, pdb);
+      }
+      else {
+        writer.Write(modifierRecord.ModifiedType.ToString(pdb));
+      }
     }
 
-    TypeRecord nestedType = pdb.GetRecord(nestedTypeRecord.Type);
-    if (nestedType is TagRecord) {
-      // WriteDefinition(tagRecord);
-      return sb.ToString();
+    public void WriteRecord(NestedTypeRecord nestedTypeRecord, PdbFile pdb) {
+      if (nestedTypeRecord.Type.TryAsRecord(pdb) is { } rType) {
+        writer.Write("/* Nested :");
+        writer.WriteRecord(rType, pdb);
+      }
+      else {
+        writer.Write("/* Nested simple type:");
+        writer.Write(nestedTypeRecord.Type.ToString(pdb));
+      }
+
+      writer.WriteMany(" (", nestedTypeRecord.Name.String, ") */");
     }
 
-    return sb.Append("/* Nested type: ")
-      .Append(nestedTypeRecord.Type.ToString(pdb))
-      .Append(" (")
-      .Append(nestedType.GetType().Name)
-      .Append(") ")
-      .Append(" */")
-      .ToString();
-  }
-
-  public static string ToString(this OneMethodRecord methodMember, PdbFile pdb) {
-    using var _ = Rent(out StringBuilder sb);
-    MemberFunctionRecord methodFunction = pdb.GetRecord<MemberFunctionRecord>(methodMember.Type);
-    if (methodMember.Name.String?.StartsWith('~') ?? false) {
-      return sb.Append("/* Skipping Destructor function ")
-        .Append(methodMember.Name.String)
-        .Append("() */")
-        .ToString();
+    public void WriteRecord(OneMethodRecord method, PdbFile pdb, string? overloadName = null) {
+      string name = overloadName ?? method.Name.String;
+      MemberFunctionRecord mFunc = method.Type.As<MemberFunctionRecord>(pdb);
+      writer.Write(name);
+      writer.WriteRecord(mFunc, pdb);
     }
 
-    ArgumentListRecord args = pdb.GetRecord<ArgumentListRecord>(methodFunction.ArgumentList);
-    if (!methodFunction.Options.HasFlag(FunctionOptions.Constructor)) {
-      sb.Append(methodFunction.ReturnType.ToString(pdb))
-        .Append(' ');
+    public void WriteRecord(OverloadedMethodRecord overload, PdbFile pdb) {
+      writer.WriteRecord(overload.MethodList.As<MethodOverloadListRecord>(pdb), pdb, overload.Name.String);
     }
 
-    return sb.Append(_currentMethodOverloadName ?? methodMember.Name.String)
-      .Append('(')
-      .Append(args.ToString(pdb))
-      .Append(')')
-      .ToString();
-  }
-
-  public static string ToString(this OverloadedMethodRecord overloadedMethodRecord, PdbFile pdb) {
-    string? oldName = _currentMethodOverloadName;
-    _currentMethodOverloadName = overloadedMethodRecord.Name.String;
-    string result = overloadedMethodRecord.MethodList.As<MethodOverloadListRecord>(pdb).ToString(pdb);
-    _currentMethodOverloadName = oldName;
-    return result;
-  }
-
-  public static string ToString(this PointerRecord pointerRecord, PdbFile pdb) {
-    using var _ = Rent(out StringBuilder sb);
-    return sb
-      // TODO: along with this whole file, ensure everything is useful for C# code gen
-      // commented out for C# code gen
-      //.AppendIf(pointerRecord.IsConst, "const ")
-      .AppendIf(pointerRecord.IsVolatile, "volatile ")
-      .Append(pointerRecord.ReferentType.ToString(pdb))
-      .Append(pointerRecord.Mode switch {
+    public void WriteRecord(PointerRecord pointerRecord, PdbFile pdb, string? typeName = null) {
+      writer.WriteIf("const ", pointerRecord.IsConst);
+      writer.WriteIf("volatile ", pointerRecord.IsVolatile);
+      writer.Write(typeName ?? pointerRecord.ReferentType.ToString(pdb));
+      writer.Write(pointerRecord.Mode switch {
         PointerMode.Pointer => "*",
         PointerMode.LValueReference => "&",
         PointerMode.RValueReference => "&&",
         _ => string.Empty
-      })
-      .ToString();
-
-    // PointerKindCounts.Increment(pointerRecord.PointerKind);
-  }
-
-  public static string ToString(this ProcedureRecord procedureRecord, PdbFile pdb) {
-    using var _ = Rent(out StringBuilder sb);
-    ushort paramsLeft = procedureRecord.ParameterCount;
-    sb.Append("/*    PROC */ ");
-
-    // bool isStatic = proc.Kind is SymbolRecordKind.S_GPROC32;
-    // if (isStatic) {
-    //   sb.Append("static ");
-    // }
-
-    sb.Append(procedureRecord.ReturnType.ToString(pdb));
-    sb.Append(' ');
-    // sb.Append(procName);
-    return sb.ToString();
-  }
-
-  public static string ToString(this StaticDataMemberRecord staticDataMemberRecord, PdbFile pdb) {
-    using var _ = Rent(out StringBuilder sb);
-    return sb.Append("static ")
-      .Append(staticDataMemberRecord.Type.ToString(pdb))
-      .Append(' ')
-      .Append(staticDataMemberRecord.Name.String)
-      .Append(';')
-      .ToString();
-  }
-
-  public static string ToString(this StringIdRecord stringIdRecord, PdbFile pdb) {
-    return
-      $"/* StringId: " +
-      $"Id = {stringIdRecord.Id.ToString(pdb)} " +
-      $"Name = \"{stringIdRecord.String.String}\" */";
-  }
-
-  public static string ToString(this StringListRecord stringListRecord, PdbFile pdb) {
-    using var _ = Rent(out StringBuilder sb);
-    sb.AppendLine("/* StringList: {");
-    foreach (TypeIndex str in stringListRecord.StringIndices) {
-      sb.Append("    ")
-        .AppendLine(str.ToString(pdb));
+      });
     }
 
-    return sb
-      .Append("} */")
-      .ToString();
-  }
+    public void WriteRecord(ProcedureRecord proc, PdbFile pdb) {
+      writer.WriteFlagIfHasFlag(proc.Options, FunctionOptions.Constructor, "ctor ");
+      writer.WriteFlagIfHasFlag(proc.Options, FunctionOptions.ConstructorWithVirtualBases, "vctor ");
+      writer.WriteFlagIfHasFlag(proc.Options, FunctionOptions.CxxReturnUdt, "cxxretudt ");
+      writer.Write(proc.CallingConvention switch {
+        CallingConvention.NearC or CallingConvention.FarC => "cdecl",
+        CallingConvention.NearFast or CallingConvention.FarFast => "fastcall",
+        CallingConvention.NearStdCall or CallingConvention.FarStdCall => "stdcall",
+        CallingConvention.ThisCall => "thiscall",
+        _ => proc.CallingConvention.ToString()
+      });
+      writer.Write(" (");
+      writer.WriteRecord(proc.ArgumentList.As<ArgumentListRecord>(pdb), pdb);
+      writer.Write(")");
+      if (proc.ReturnType is not { SimpleMode: SimpleTypeMode.Direct, SimpleKind: SimpleTypeKind.Void }) {
+        writer.Write(" -> ");
+        writer.Write(proc.ReturnType.ToString(pdb));
+      }
+    }
 
-  public static string ToString(this TagRecord tagRecord, PdbFile pdb) => tagRecord.Name.String.Replace("::", "__");
+    public void WriteRecord(StaticDataMemberRecord data, PdbFile pdb) {
+      writer.WriteMany("static ", data.Type.ToString(pdb), " ", data.Name.String, ";");
+    }
 
-  public static string ToString(this UdtModuleSourceLineRecord udtModuleSourceLineRecord, PdbFile pdb) {
-    return
-      $"/* UdtModuleSourceLine: " +
-      $"Module = {udtModuleSourceLineRecord.Module:X4}, " +
-      $"LineNumber = {udtModuleSourceLineRecord.LineNumber} " +
-      $"UDT = {udtModuleSourceLineRecord.UDT.ToString(pdb)} " +
-      $"SourceFile = {udtModuleSourceLineRecord.SourceFile.Index} " +
-      $"*/";
-  }
+    public void WriteRecord(StringIdRecord stringIdRecord, PdbFile pdb) {
+      writer.Write("/* StringId: ");
+      writer.WriteManyIf(["Id = ", stringIdRecord.Id.Index.ToString()], stringIdRecord.Id.Index != 0);
+      writer.WriteMany(" Name = \"", stringIdRecord.String.String, "\" */");
+    }
 
-  // UnionRecord handled by TagRecord
+    public void WriteRecord(StringListRecord stringListRecord, PdbFile pdb) {
+      writer.Write("/* StringList:");
+      IndentedTextWriter? iWriter = writer as IndentedTextWriter;
+      TextWriterExtensions.BracedIndent bracedScope = iWriter is not null ? iWriter.BracedScope() : default;
+      foreach (TypeIndex str in stringListRecord.StringIndices) {
+        writer.WriteRecord(str.As<StringIdRecord>(pdb.IpiStream), pdb);
+      }
 
-  public static string ToString(this VirtualBaseClassRecord virtualBaseClassRecord, PdbFile pdb) {
-    using var _ = Rent(out StringBuilder sb);
-    MemberAccess access = virtualBaseClassRecord.Attributes.Access;
-    bool hasAccessType = access is not MemberAccess.None;
+      if (iWriter is not null) bracedScope.Dispose();
+    }
 
-    return sb
-      .AppendIf(hasAccessType, Enum.GetName(access)!.ToLower())
-      .Append("virtual ")
-      .Append(virtualBaseClassRecord.BaseType.ToString(pdb))
-      .ToString();
-  }
+    public void WriteRecord(TagRecord tagRecord, PdbFile pdb) => writer.Write(tagRecord.Name.String);
 
-  public static string ToString(this VirtualFunctionPointerRecord virtualFunctionPointerRecord, PdbFile pdb) {
-    return
-      $"/* VF Pointer: " +
-      $"Type = {virtualFunctionPointerRecord.Type.ToString(pdb)} " +
-      $"*/";
-  }
+    public void WriteRecord(UdtModuleSourceLineRecord sourceLine, PdbFile pdb) {
+      DbiModuleList moduleList = pdb.DbiStream.Modules;
+      var namesDict = pdb.InfoStream.NamesMap.Dictionary;
+      TypeIndex udt = sourceLine.UDT;
+      TagRecord record = udt.As<TagRecord>(pdb);
+      writer.WriteMany(
+        "/* UdtModuleSourceLine:",
+        record.IsForwardReference ? " FORWARD" : "",
+        " UDT = ", record.Name.String, " (", udt.Index.ToString("X"), ")",
+        " Module = ", moduleList[sourceLine.Module].ModuleName.String,
+        " SourceFile = ", namesDict[sourceLine.SourceFile.Index],
+        " LineNumber = ", sourceLine.LineNumber.ToString(),
+        " */");
+    }
 
-  public static string ToString(this VirtualFunctionTableShapeRecord vfts, PdbFile pdb) {
-    using var _ = Rent(out StringBuilder sb);
-    return sb
-      .Append("/* VFT Shape: Slots = ")
-      .Append('(')
-      .Append(string.Join(", ", vfts.Slots.Select(Enum.GetName)))
-      .Append(')')
-      .Append(" */")
-      .ToString();
+    public void WriteRecord(VirtualBaseClassRecord vBaseClass, PdbFile pdb) {
+      if (vBaseClass.Attributes.Access is var access and not MemberAccess.None) {
+        writer.Write(access.ToString());
+        writer.Write(" ");
+      }
+
+      writer.Write("virtual ");
+      writer.WriteRecord(vBaseClass.BaseType.As<TagRecord>(pdb), pdb);
+    }
+
+    public void WriteRecord(VirtualFunctionPointerRecord vfPtr, PdbFile pdb) {
+      writer.WriteMany(
+        "/* VF Pointer:",
+        " Type = ", vfPtr.Type.ToString(pdb),
+        " */");
+    }
+
+    public void WriteRecord(VirtualFunctionTableShapeRecord vfts, PdbFile pdb) {
+      writer.WriteMany("/* VFT Shape: Slots Count = ", vfts.Slots.Length.ToString());
+    }
+
+    public void WriteRecord(TypeRecord record, PdbFile pdb) {
+      switch (record) {
+        case ArgumentListRecord argumentListRecord:
+          writer.WriteRecord(argumentListRecord, pdb);
+          break;
+        case ArrayRecord arrayRecord:
+          writer.WriteRecord(arrayRecord, pdb);
+          break;
+        case BaseClassRecord baseClassRecord:
+          writer.WriteRecord(baseClassRecord, pdb);
+          break;
+        case BitFieldRecord bitFieldRecord:
+          writer.WriteRecord(bitFieldRecord, pdb);
+          break;
+        case BuildInfoRecord buildInfoRecord:
+          writer.WriteRecord(buildInfoRecord, pdb);
+          break;
+        // ClassRecord, covered by TagRecord
+        case DataMemberRecord dataMemberRecord:
+          writer.WriteRecord(dataMemberRecord, pdb);
+          break;
+        // EnumRecord, covered by TagRecord
+        case EnumeratorRecord enumeratorRecord:
+          writer.WriteRecord(enumeratorRecord, pdb);
+          break;
+        case FieldListRecord fieldListRecord:
+          writer.WriteRecord(fieldListRecord, pdb);
+          break;
+        case FunctionIdRecord functionIdRecord:
+          writer.WriteRecord(functionIdRecord, pdb);
+          break;
+        case LabelRecord labelRecord:
+          writer.WriteRecord(labelRecord, pdb);
+          break;
+        case ListContinuationRecord listContinuationRecord:
+          writer.WriteRecord(listContinuationRecord, pdb);
+          break;
+        case MemberFunctionIdRecord memberFunctionIdRecord:
+          writer.WriteRecord(memberFunctionIdRecord, pdb);
+          break;
+        case MemberFunctionRecord memberFunctionRecord:
+          writer.WriteRecord(memberFunctionRecord, pdb);
+          break;
+        case ModifierRecord modifierRecord:
+          writer.WriteRecord(modifierRecord, pdb);
+          break;
+        case NestedTypeRecord nestedTypeRecord:
+          writer.WriteRecord(nestedTypeRecord, pdb);
+          break;
+        case OneMethodRecord methodMember:
+          writer.WriteRecord(methodMember, pdb);
+          break;
+        case OverloadedMethodRecord overloadedMethodRecord:
+          writer.WriteRecord(overloadedMethodRecord, pdb);
+          break;
+        case PointerRecord pointerRecord:
+          writer.WriteRecord(pointerRecord, pdb);
+          break;
+        case ProcedureRecord procedureRecord:
+          writer.WriteRecord(procedureRecord, pdb);
+          break;
+        case StaticDataMemberRecord staticDataMemberRecord:
+          writer.WriteRecord(staticDataMemberRecord, pdb);
+          break;
+        case StringIdRecord stringIdRecord:
+          writer.WriteRecord(stringIdRecord, pdb);
+          break;
+        case StringListRecord stringListRecord:
+          writer.WriteRecord(stringListRecord, pdb);
+          break;
+        case TagRecord tagRecord:
+          writer.WriteRecord(tagRecord, pdb);
+          break;
+        case UdtModuleSourceLineRecord udtModuleSourceLineRecord:
+          writer.WriteRecord(udtModuleSourceLineRecord, pdb);
+          break;
+        // UnionRecord, covered by TagRecord
+        case VirtualBaseClassRecord virtualBaseClassRecord:
+          writer.WriteRecord(virtualBaseClassRecord, pdb);
+          break;
+        case VirtualFunctionPointerRecord virtualFunctionPointerRecord:
+          writer.WriteRecord(virtualFunctionPointerRecord, pdb);
+          break;
+        case VirtualFunctionTableShapeRecord vfts:
+          writer.WriteRecord(vfts, pdb);
+          break;
+        case NullRecord:
+          writer.Write("/* Null Record */");
+          break;
+      }
+    }
   }
 
   public static string ToString(this TypeRecord record, PdbFile pdb) {
-    return record switch {
-      ArgumentListRecord argumentListRecord => argumentListRecord.ToString(pdb),
-      ArrayRecord arrayRecord => arrayRecord.ToString(pdb),
-      BaseClassRecord baseClassRecord => baseClassRecord.ToString(pdb),
-      BitFieldRecord bitFieldRecord => bitFieldRecord.ToString(pdb),
-      BuildInfoRecord buildInfoRecord => buildInfoRecord.ToString(pdb),
-      // ClassRecord, covered by TagRecord
-      DataMemberRecord dataMemberRecord => dataMemberRecord.ToString(pdb),
-      // EnumRecord, covered by TagRecord
-      EnumeratorRecord enumeratorRecord => enumeratorRecord.ToString(pdb),
-      FieldListRecord fieldListRecord => fieldListRecord.ToString(pdb),
-      FunctionIdRecord functionIdRecord => functionIdRecord.ToString(pdb),
-      LabelRecord labelRecord => labelRecord.ToString(pdb),
-      ListContinuationRecord listContinuationRecord => listContinuationRecord.ToString(pdb),
-      MemberFunctionIdRecord memberFunctionIdRecord => memberFunctionIdRecord.ToString(pdb),
-      MemberFunctionRecord memberFunctionRecord => memberFunctionRecord.ToString(pdb),
-      MethodOverloadListRecord methodOverloadListRecord => methodOverloadListRecord.ToString(pdb),
-      ModifierRecord modifierRecord => modifierRecord.ToString(pdb),
-      NestedTypeRecord nestedTypeRecord => nestedTypeRecord.ToString(pdb),
-      OneMethodRecord methodMember => methodMember.ToString(pdb),
-      OverloadedMethodRecord overloadedMethodRecord => overloadedMethodRecord.ToString(pdb),
-      PointerRecord pointerRecord => pointerRecord.ToString(pdb),
-      ProcedureRecord procedureRecord => procedureRecord.ToString(pdb),
-      StaticDataMemberRecord staticDataMemberRecord => staticDataMemberRecord.ToString(pdb),
-      StringIdRecord stringIdRecord => stringIdRecord.ToString(pdb),
-      StringListRecord stringListRecord => stringListRecord.ToString(pdb),
-      TagRecord tagRecord => tagRecord.ToString(pdb),
-      UdtModuleSourceLineRecord udtModuleSourceLineRecord => udtModuleSourceLineRecord.ToString(pdb),
-      // UnionRecord, covered by TagRecord
-      VirtualBaseClassRecord virtualBaseClassRecord => virtualBaseClassRecord.ToString(pdb),
-      VirtualFunctionPointerRecord virtualFunctionPointerRecord => virtualFunctionPointerRecord.ToString(pdb),
-      VirtualFunctionTableShapeRecord vfts => vfts.ToString(pdb),
-      NullRecord => "/* Null Record */",
-      _ => $"/* UNHANDLED {Enum.GetName(record.Kind)} - {record.GetType().Name} */"
-    };
+    using var _ = Rent(out StringBuilder sb);
+    IndentedTextWriter writer = new(new StringWriter(sb));
+    writer.WriteRecord(record, pdb);
+    writer.Flush();
+    return sb.ToString();
   }
 }

@@ -1,7 +1,8 @@
 ﻿using System.Diagnostics.CodeAnalysis;
 using System.Text;
+using Flags = SharpPdb.Windows.NameUndecorator.Flags;
 
-namespace PdbToCSharp;
+namespace PdbToCSharp.Lang.Cs;
 
 // This code is almost entirely copied from SharpPdb, with some changes to make its output more C# friendly.
 
@@ -9,100 +10,27 @@ namespace PdbToCSharp;
 /// Implements UnDecorateSymbolName function. Implementation has started as Wine implementation clone.
 /// </summary>
 public static class CsNameUndecorator {
-  /// <summary>
-  /// The flags for how the decorated name is undecorated.
-  /// </summary>
-  [Flags]
-  public enum Flags {
-    /// <summary>
-    /// [UNDNAME_COMPLETE] Enable full undecoration.
-    /// </summary>
-    Complete = 0x0000,
+  private static bool Failed(Parser parser) {
+    if (parser.Input.StartsWith("??$type_id")) {
+      ; // breakpoint here
+    }
 
-    /// <summary>
-    /// [UNDNAME_NO_LEADING_UNDERSCORES] Remove leading underscores from Microsoft keywords.
-    /// </summary>
-    NoLeadingUnderscores = 0x0001,
+    return false;
+  }
 
-    /// <summary>
-    /// [UNDNAME_NO_MS_KEYWORDS] Disable expansion of Microsoft keywords.
-    /// </summary>
-    NoMicrosoftKeywords = 0x0002,
+  private static string? FailedNull(Parser parser) {
+    if (parser.Input.StartsWith("??$type_id")) {
+      ; // breakpoint here
+    }
 
-    /// <summary>
-    /// [UNDNAME_NO_FUNCTION_RETURNS] Disable expansion of return types for primary declarations.
-    /// </summary>
-    NoFunctionReturns = 0x0004,
+    return null;
+  }
 
-    /// <summary>
-    /// [UNDNAME_NO_ALLOCATION_MODEL] Disable expansion of the declaration model.
-    /// </summary>
-    NoAllocationModel = 0x0008,
-
-    /// <summary>
-    /// [UNDNAME_NO_ALLOCATION_LANGUAGE] Disable expansion of the declaration language specifier.
-    /// </summary>
-    NoAllocationLanguage = 0x0010,
-
-    /// <summary>
-    /// [UNDNAME_NO_MS_THISTYPE] Disable expansion of Microsoft keywords on the this type for primary declaration.
-    /// </summary>
-    NoMicrosoftThisType = 0x0020,
-
-    /// <summary>
-    /// [UNDNAME_NO_CV_THISTYPE] Disable expansion of CodeView modifiers on the this type for primary declaration.
-    /// </summary>
-    NoCodeViewThisType = 0x0040,
-
-    /// <summary>
-    /// [UNDNAME_NO_THISTYPE] Disable all modifiers on the this type.
-    /// </summary>
-    NoThisType = 0x0060,
-
-    /// <summary>
-    /// [UNDNAME_NO_ACCESS_SPECIFIERS] Disable expansion of access specifiers for members.
-    /// </summary>
-    NoAccessSpecifiers = 0x0080,
-
-    /// <summary>
-    /// [UNDNAME_NO_THROW_SIGNATURES] Disable expansion of throw-signatures for functions and pointers to functions.
-    /// </summary>
-    NoThrowSignatures = 0x0100,
-
-    /// <summary>
-    /// [UNDNAME_NO_MEMBER_TYPE] Disable expansion of the static or virtual attribute of members.
-    /// </summary>
-    NoMemberType = 0x0200,
-
-    /// <summary>
-    /// [UNDNAME_NO_RETURN_UDT_MODEL] Disable expansion of the Microsoft model for user-defined type returns.
-    /// </summary>
-    NoReturnUdtModel = 0x0400,
-
-    /// <summary>
-    /// [UNDNAME_32_BIT_DECODE] Undecorate 32-bit decorated names.
-    /// </summary>
-    Decode32Bit = 0x0800,
-
-    /// <summary>
-    /// [UNDNAME_NAME_ONLY] Undecorate only the name for primary declaration. Returns [scope::]name. Does expand template parameters.
-    /// </summary>
-    NameOnly = 0x1000,
-
-    /// <summary>
-    /// [UNDNAME_NO_ARGUMENTS] Do not undecorate function arguments.
-    /// </summary>
-    NoArguments = 0x2000,
-
-    /// <summary>
-    /// [UNDNAME_NO_SPECIAL_SYMS] Do not undecorate special names, such as vtable, vcall, vector, metatype, and so on.
-    /// </summary>
-    NoSpecialSymbols = 0x4000,
-
-    /// <summary>
-    /// [UNDNAME_NO_COMPLEX_TYPE]
-    /// </summary>
-    NoComplexType = 0x8000,
+  private struct FunctionSignature {
+    public string? CallConv;
+    public string? Exported;
+    public string? Arguments;
+    public (string? Left, string? Right) Return;
   }
 
   /// <summary>
@@ -156,6 +84,7 @@ public static class CsNameUndecorator {
     public char Current;
     public StringArray Stack = new();
     public readonly StringArray Names = new();
+    public ReadOnlySpan<char> Remaining => Input.AsSpan(Index);
 
     public char Next() {
       if (Index + 1 < Input.Length) {
@@ -207,7 +136,8 @@ public static class CsNameUndecorator {
     // Then function name or operator code
     int doAfter = 0;
 
-    switch (parser.Current) {
+    char curr = parser.Current;
+    switch (curr) {
       case '?' when parser.Peek(1) != '$' || parser.Peek(2) == '?': {
         string? functionName = null;
 
@@ -409,14 +339,14 @@ public static class CsNameUndecorator {
                 break;
               case 'R':
                 parser.Flags |= Flags.NoFunctionReturns;
-                switch (parser.Next()) {
+                char r = parser.Next();
+                switch (r) {
                   case '0': {
                     StringArray pmt = new();
 
                     parser.Next();
-                    DemangleDataType(parser, out string? left, out string? right, pmt);
-                    if (!DemangleDataType(parser, out left, out right))
-                      return false;
+                    if (!DemangleDataType(parser, out string? left, out string? right))
+                      return Failed(parser);
 
                     functionName = left + right + " `RTTI Type Descriptor'";
                     parser.Advance(-1);
@@ -463,13 +393,13 @@ public static class CsNameUndecorator {
                 functionName = "`placement delete[] closure'";
                 break;
               default:
-                return false;
+                return Failed(parser);
             }
 
             break;
           default:
             // FIXME: Other operators
-            return false;
+            return Failed(parser);
         }
 
         parser.Next();
@@ -517,7 +447,7 @@ public static class CsNameUndecorator {
       default:
         // Class the function is associated with, terminated by '@@'
         if (!GetClass(parser))
-          return false;
+          return Failed(parser);
 
         break;
     }
@@ -526,7 +456,7 @@ public static class CsNameUndecorator {
       case 1 or 2:
         // it's time to set the member name for ctor & dtor
         if (parser.Stack.Num <= 1)
-          return false;
+          return Failed(parser);
 
         if (doAfter == 1)
           parser.Stack.Strings![0] = parser.Stack.Strings[1];
@@ -543,7 +473,9 @@ public static class CsNameUndecorator {
         break;
     }
 
-    return parser.Current switch {
+    char current = parser.Current;
+    var remaining = parser.Remaining;
+    return current switch {
       // Function/Data type and access level
       >= '0' and <= '9' => HandleData(parser, out undecoratedName),
       >= 'A' and <= 'Z' or '$' => HandleMethod(parser, out undecoratedName, doAfter == 3),
@@ -599,9 +531,9 @@ public static class CsNameUndecorator {
         StringArray pmt = new();
 
         if (!DemangleDataType(parser, out left, out right, pmt))
-          return false;
+          return Failed(parser);
         if (!GetModifier(parser, out modifier, out string? ptrModif))
-          return false;
+          return Failed(parser);
 
         if (modifier is not null && ptrModif is not null)
           modifier = modifier + " " + ptrModif;
@@ -615,13 +547,13 @@ public static class CsNameUndecorator {
       {
         left = right = null;
         if (!GetModifier(parser, out modifier, out string? _))
-          return false;
+          return Failed(parser);
 
         if (parser.Current != '@') {
           string? cls = GetClassName(parser);
 
           if (cls is null)
-            return false;
+            return Failed(parser);
 
           right = "{for `" + cls + "'}";
         }
@@ -632,7 +564,7 @@ public static class CsNameUndecorator {
         modifier = left = right = null;
         break;
       default:
-        return false;
+        return Failed(parser);
     }
 
     if ((parser.Flags & Flags.NameOnly) == Flags.NameOnly)
@@ -697,12 +629,12 @@ public static class CsNameUndecorator {
       else if (parser.Current == 'R')
         accessId = (parser.Peek(1) - '0') / 2;
       else if (parser.Current != 'B')
-        return false;
+        return Failed(parser);
     }
     else if (accmem is >= 'A' and <= 'Z')
       accessId = (accmem - 'A') / 8;
     else
-      return false;
+      return Failed(parser);
 
     access = accessId switch {
       0 => "private ",
@@ -744,7 +676,7 @@ public static class CsNameUndecorator {
 
         if (n is null || parser.Current != 'A') {
           parser.Next();
-          return false;
+          return Failed(parser);
         }
 
         parser.Next();
@@ -762,7 +694,7 @@ public static class CsNameUndecorator {
         string? n4 = GetNumber(parser);
 
         if (n1 is null || n2 is null || n3 is null || n4 is null)
-          return false;
+          return Failed(parser);
 
         name = name + "`vtordispex{" + n1 + "," + n2 + "," + n3 + "," + n4 + "}' ";
         break;
@@ -774,7 +706,7 @@ public static class CsNameUndecorator {
         string? n2 = GetNumber(parser);
 
         if (n1 is null || n2 is null)
-          return false;
+          return Failed(parser);
 
         name = name + "`vtordisp{" + n1 + "," + n2 + "}' ";
         break;
@@ -790,7 +722,7 @@ public static class CsNameUndecorator {
       // Implicit 'this' pointer
       // If there is an implicit this pointer, const modifier follows
       if (!GetModifier(parser, out modifier, out string? ptrModif))
-        return false;
+        return Failed(parser);
 
       if (modifier is not null || ptrModif is not null)
         modifier = modifier + " " + ptrModif;
@@ -798,7 +730,7 @@ public static class CsNameUndecorator {
 
     if (!GetCallingConvention(parser.Current, out string? callConv, out string? exported, parser.Flags)) {
       parser.Next();
-      return false;
+      return Failed(parser);
     }
 
     parser.Next();
@@ -808,13 +740,14 @@ public static class CsNameUndecorator {
 
     // Return type, or @ if 'void'
     if (hasRet) {
-      if (parser.Current == '@') {
+      char current = parser.Current;
+      if (current == '@') {
         retLeft = "void";
         retRight = null;
         parser.Next();
       }
       else if (!DemangleDataType(parser, out retLeft, out retRight, pmt)) {
-        return false;
+        return Failed(parser);
       }
     }
 
@@ -830,7 +763,7 @@ public static class CsNameUndecorator {
     if (hasArgs) {
       argsStr = GetArgs(parser, pmt, true, '(', ')');
       if (argsStr is null)
-        return false;
+        return Failed(parser);
     }
 
     if ((parser.Flags & Flags.NameOnly) == Flags.NameOnly)
@@ -847,11 +780,15 @@ public static class CsNameUndecorator {
     return true;
   }
 
-  private static bool DemangleDataType(Parser parser, [NotNullWhen(true)] out string? left, [NotNullWhen(true)] out string? right, StringArray? pmt = null,
+  private static bool DemangleDataType(Parser parser, [NotNullWhen(true)] out string? left,
+    [NotNullWhen(true)] out string? right, StringArray? pmt = null,
     bool inArgs = false) {
     bool addPmt = true;
     char dt = parser.Current;
+    char dt2 = parser.Peek(1);
+    char dt3 = parser.Peek(2);
 
+    var str = parser.Remaining;
     parser.Next();
     left = right = null;
     switch (dt) {
@@ -884,7 +821,7 @@ public static class CsNameUndecorator {
         string? typeName = GetClassName(parser);
 
         if (typeName is null)
-          return false;
+          return Failed(parser);
 
         if ((parser.Flags & Flags.NoComplexType) != Flags.NoComplexType) {
           typeName = dt switch {
@@ -905,27 +842,28 @@ public static class CsNameUndecorator {
           string? ptr = GetNumber(parser);
 
           if (ptr is null)
-            return false;
+            return Failed(parser);
 
           left = "`template-parameter-" + ptr + "'";
         }
         else {
+          var rem = parser.Remaining;
           if (!GetModifiedType(parser, out left, out right, pmt, '?', inArgs))
-            return false;
+            return Failed(parser);
         }
 
         break;
       case 'A': // reference
       case 'B': // volatile reference
         if (!GetModifiedType(parser, out left, out right, pmt, dt, inArgs))
-          return false;
+          return Failed(parser);
 
         break;
       case 'Q': // const pointer
       case 'R': // volatile pointer
       case 'S': // const volatile pointer
         if (!GetModifiedType(parser, out left, out right, pmt, inArgs ? dt : 'P', inArgs))
-          return false;
+          return Failed(parser);
 
         break;
       case 'P':
@@ -935,35 +873,23 @@ public static class CsNameUndecorator {
           //  P8 = Member function pointer
           //  others who knows..
           if (parser.Current == '8') {
-            int mark = parser.Stack.Num;
             parser.Next();
             string? cls = GetClassName(parser);
             if (cls is null)
-              return false;
+              return Failed(parser);
             if (!GetModifier(parser, out string? modifier, out string? ptrModif))
-              return false;
+              return Failed(parser);
 
             if (modifier is not null)
               modifier += " " + ptrModif;
             else if (ptrModif is not null)
               modifier = " " + ptrModif;
-            if (!GetCallingConvention(parser.Current, out string? callConv, out string? _,
-                  parser.Flags & ~Flags.NoAllocationLanguage)) {
-              parser.Next();
+            if (!GetFunctionSignature(parser, pmt, out FunctionSignature fs)) {
               return false;
             }
 
-            parser.Next();
-            if (!DemangleDataType(parser, out string? subLeft, out string? subRight, pmt))
-              return false;
-
-            string? args = GetArgs(parser, pmt, true, '(', ')');
-            if (args is null)
-              return false;
-
-            parser.Stack.Num = mark;
-            left = subLeft + subRight + " (" + callConv + " " + cls + ".*";
-            right = ")" + args + modifier;
+            left = fs.Return.Left + fs.Return.Right + " (" + fs.CallConv + " " + cls + ".*";
+            right = ")" + fs.Arguments + modifier;
           }
           else if (parser.Current == '6') {
             int mark = parser.Stack.Num;
@@ -971,26 +897,26 @@ public static class CsNameUndecorator {
             if (!GetCallingConvention(parser.Current, out string? callConv, out string? _,
                   parser.Flags & ~Flags.NoAllocationLanguage)) {
               parser.Next();
-              return false;
+              return Failed(parser);
             }
 
             parser.Next();
             if (!DemangleDataType(parser, out string? subLeft, out string? subRight, pmt))
-              return false;
+              return Failed(parser);
 
             string? args = GetArgs(parser, pmt, true, '(', ')');
             if (args is null)
-              return false;
+              return Failed(parser);
 
             parser.Stack.Num = mark;
             left = subLeft + subRight + " (" + callConv + "*";
             right = ")" + args;
           }
           else
-            return false;
+            return Failed(parser);
         }
         else if (!GetModifiedType(parser, out left, out right, pmt, 'P', inArgs))
-          return false;
+          return Failed(parser);
 
         break;
       case 'W':
@@ -998,7 +924,7 @@ public static class CsNameUndecorator {
           parser.Next();
           string? enumName = GetClassName(parser);
           if (enumName is null)
-            return false;
+            return Failed(parser);
 
           if ((parser.Flags & Flags.NoComplexType) == Flags.NoComplexType)
             left = enumName;
@@ -1006,7 +932,7 @@ public static class CsNameUndecorator {
             left = "enum " + enumName;
         }
         else
-          return false;
+          return Failed(parser);
 
         break;
       case '0':
@@ -1022,12 +948,12 @@ public static class CsNameUndecorator {
         // Referring back to previously parsed type
         // left and right are pushed as two separate strings
         if (pmt is null)
-          return false;
+          return Failed(parser);
 
         left = pmt.Get((dt - '0') * 2);
         right = pmt.Get((dt - '0') * 2 + 1);
         if (left is null)
-          return false;
+          return Failed(parser);
 
         addPmt = false;
         break;
@@ -1038,32 +964,32 @@ public static class CsNameUndecorator {
           case '0': {
             left = GetNumber(parser);
             if (left is null)
-              return false;
+              return Failed(parser);
 
             break;
           }
           case 'D': {
-            if (GetNumber(parser) is not {} p1) {
-              return false;
+            if (GetNumber(parser) is not { } p1) {
+              return Failed(parser);
             }
 
-            left = "`tepmlate-parameter" + p1 + "'";
+            left = "`template-parameter" + p1 + "'";
             break;
           }
           case 'F': {
-            if (GetNumber(parser) is not {} p1 ||
-                GetNumber(parser) is not {} p2) {
-              return false;
+            if (GetNumber(parser) is not { } p1 ||
+                GetNumber(parser) is not { } p2) {
+              return Failed(parser);
             }
 
             left = "{" + p1 + "," + p2 + "}";
           }
             break;
           case 'G': {
-            if (GetNumber(parser) is not {} p1 ||
-                GetNumber(parser) is not {} p2 ||
-                GetNumber(parser) is not {} p3) {
-              return false;
+            if (GetNumber(parser) is not { } p1 ||
+                GetNumber(parser) is not { } p2 ||
+                GetNumber(parser) is not { } p3) {
+              return Failed(parser);
             }
 
             left = "{" + p1 + "," + p2 + "," + p3 + "}";
@@ -1072,31 +998,45 @@ public static class CsNameUndecorator {
           case 'Q': {
             left = GetNumber(parser);
             if (left is null)
-              return false;
+              return Failed(parser);
 
             left = "`non-type-template-parameter" + left + "'";
             break;
           }
           case '$':
-            switch (parser.Current) {
+            char next = parser.Current;
+            switch (next) {
+              case 'A': {
+                char next2 = parser.Next();
+                if (next2 is '6') {
+                  parser.Next();
+                  if (!GetFunctionSignature(parser, pmt, out FunctionSignature fs))
+                    return Failed(parser);
+
+                  left = fs.Return.Left + fs.Return.Right + ' ' + fs.CallConv + fs.Arguments;
+                }
+
+                break;
+              }
               case 'B': {
                 int mark = parser.Stack.Num;
                 string? arr = null;
                 parser.Next();
 
                 // multidimensional arrays
-                if (parser.Current == 'Y') {
+                char next2 = parser.Current;
+                if (next2 == 'Y') {
                   parser.Next();
                   string? n1 = GetNumber(parser);
                   if (n1 is null || !int.TryParse(n1, out int num))
-                    return false;
+                    return Failed(parser);
 
                   while (num-- > 0)
                     arr += "[" + GetNumber(parser) + "]";
                 }
 
                 if (!DemangleDataType(parser, out string? subLeft, out string? subRight, pmt))
-                  return false;
+                  return Failed(parser);
 
                 if (arr is not null)
                   left = subLeft + " " + arr;
@@ -1109,21 +1049,32 @@ public static class CsNameUndecorator {
               case 'C': {
                 parser.Next();
                 if (!GetModifier(parser, out string? ptr, out string? _))
-                  return false;
+                  return Failed(parser);
                 if (!DemangleDataType(parser, out left, out right, pmt, inArgs))
-                  return false;
+                  return Failed(parser);
 
                 left = left + " " + ptr;
                 break;
               }
+              case 'Q': {
+                parser.Next();
+                if (!GetModifiedType(parser, out left, out right, pmt, '$', inArgs))
+                  return Failed(parser);
+
+                break;
+              }
+              default:
+                return Failed(parser);
             }
 
             break;
+          default:
+            return Failed(parser);
         }
       }
         break;
       default:
-        return false;
+        return Failed(parser);
     }
 
     if (addPmt && pmt is not null && inArgs) {
@@ -1132,7 +1083,28 @@ public static class CsNameUndecorator {
       pmt.Push(right ?? "");
     }
 
-    return left is not null;
+    return left is not null || Failed(parser);
+  }
+
+  private static bool GetFunctionSignature(Parser parser, StringArray? pmt, out FunctionSignature fs) {
+    fs = default;
+    int mark = parser.Stack.Num;
+    if (!GetCallingConvention(parser.Current, out fs.CallConv, out fs.Exported,
+          parser.Flags & ~Flags.NoAllocationLanguage)) {
+      parser.Next();
+      return Failed(parser);
+    }
+
+    parser.Next();
+    if (!DemangleDataType(parser, out fs.Return.Left, out fs.Return.Right, pmt))
+      return Failed(parser);
+
+    fs.Arguments = GetArgs(parser, pmt, true, '(', ')');
+    if (fs.Arguments is null)
+      return Failed(parser);
+
+    parser.Stack.Num = mark;
+    return true;
   }
 
   private static bool GetCallingConvention(char ch, out string? callConv, out string? exported, Flags flags) {
@@ -1180,7 +1152,11 @@ public static class CsNameUndecorator {
     bool inArgs) {
     string? ptrModif = "";
 
-    if (parser.Current == 'E') {
+    GetExtendedModifier(parser, out (string? Left, string? Right) modifExt);
+
+    var rem = parser.Remaining;
+    char ptrCurrent = parser.Current;
+    if (ptrCurrent == 'E') {
       if ((parser.Flags & Flags.NoMicrosoftKeywords) != Flags.NoMicrosoftKeywords) {
         ptrModif = (parser.Flags & Flags.NoLeadingUnderscores) == Flags.NoLeadingUnderscores ? " ptr64" : " __ptr64";
       }
@@ -1189,17 +1165,18 @@ public static class CsNameUndecorator {
     }
 
     left = right = null;
-    string? strModif = null;
-    // strModif = modif switch {
-    //   'A' => " &" + ptrModif,
-    //   'B' => " &" + ptrModif + " volatile",
-    //   'P' => " *" + ptrModif,
-    //   'Q' => " *" + ptrModif + " const",
-    //   'R' => " *" + ptrModif + " volatile",
-    //   'S' => " *" + ptrModif + " const volatile",
-    //   '?' => "",
-    //   _ => null
-    // };
+    string? strModif = "";
+    strModif = modif switch {
+      'A' => " &" + ptrModif,
+      'B' => " &" + ptrModif + " volatile",
+      'P' => " *" + ptrModif,
+      'Q' => " *" + ptrModif + " const",
+      'R' => " *" + ptrModif + " volatile",
+      'S' => " *" + ptrModif + " const volatile",
+      '?' => "",
+      '$' => " &&",
+      _ => FailedNull(parser)
+    };
 
     if (modif is 'A' or 'B' or 'P' or 'Q' or 'R' or 'S') {
       strModif = '*' + ptrModif;
@@ -1207,53 +1184,104 @@ public static class CsNameUndecorator {
 
 
     if (strModif is null) {
-      return false;
+      return Failed(parser);
     }
 
-    if (!GetModifier(parser, out string? modifier, out ptrModif)) {
+    char curr = parser.Current;
+    if (GetModifier(parser, out string? modifier, out ptrModif)) {
+      int mark = parser.Stack.Num;
+
+      /* multidimensional arrays */
+      if (parser.Current == 'Y') {
+        parser.Next();
+        string? n1 = GetNumber(parser);
+        if (n1 is null || !int.TryParse(n1, out int num))
+          return Failed(parser);
+
+        if (strModif is { Length: > 0 } && strModif[0] == ' ' && modifier is null)
+          strModif = strModif[1..];
+
+        if (modifier is not null) {
+          strModif = " (" + modifier + strModif + ")";
+          modifier = null;
+        }
+        else
+          strModif = " (" + strModif + ")";
+
+        while (num-- > 0)
+          strModif += "[" + GetNumber(parser) + "]";
+      }
+
+      // Recurse to get the referred-to type
+      if (!DemangleDataType(parser, out string? subLeft, out string? subRight, pmt))
+        return Failed(parser);
+
+      if (modifier is not null)
+        left = subLeft + " " + modifier + strModif;
+      else {
+        // don't insert a space between duplicate '*'
+        if (!inArgs && strModif is [_, '*', ..] && subLeft[^1] == '*')
+          strModif = strModif[1..];
+        left = subLeft + strModif;
+      }
+
+      right = subRight;
+      parser.Stack.Num = mark;
+
       return true;
     }
+    else if (strModif is not null) {
+    }
 
-    int mark = parser.Stack.Num;
+    return Failed(parser);
+  }
 
-    /* multidimensional arrays */
-    if (parser.Current == 'Y') {
-      parser.Next();
-      string? n1 = GetNumber(parser);
-      if (n1 is null || !int.TryParse(n1, out int num))
-        return false;
-
-      if (strModif is { Length: > 0 } && strModif[0] == ' ' && modifier is null)
-        strModif = strModif[1..];
-
-      if (modifier is not null) {
-        strModif = " (" + modifier + strModif + ")";
-        modifier = null;
+  private static void GetExtendedModifier(Parser parser, out (string? Left, string? Right) modif) {
+    modif = default;
+    uint f1 = 0;
+    for (;;) {
+      switch (parser.Current) {
+        case 'E':
+          AppendExtendedModifier(parser, ref modif.Right, "__ptr64", true);
+          f1 |= 2;
+          break;
+        case 'F':
+          AppendExtendedModifier(parser, ref modif.Left, "__unaligned", true);
+          f1 |= 2;
+          break;
+        case 'G':
+          AppendExtendedModifier(parser, ref modif.Right, "&", false);
+          f1 |= 1;
+          break;
+        case 'H':
+          AppendExtendedModifier(parser, ref modif.Right, "&&", false);
+          f1 |= 1;
+          break;
+        case 'I':
+          AppendExtendedModifier(parser, ref modif.Right, "restrict", true);
+          f1 |= 2;
+          break;
+        default:
+          return;
       }
-      else
-        strModif = " (" + strModif + ")";
 
-      while (num-- > 0)
-        strModif += "[" + GetNumber(parser) + "]";
+      parser.Next();
+    }
+  }
+
+  private static void AppendExtendedModifier(Parser parser, ref string? str, string appendStr, bool isMsKeyword) {
+    if (isMsKeyword && (parser.Flags & Flags.NoMicrosoftKeywords) == Flags.NoMicrosoftKeywords) {
+      return;
     }
 
-    // Recurse to get the referred-to type
-    if (!DemangleDataType(parser, out string? subLeft, out string? subRight, pmt))
-      return false;
+    string append = isMsKeyword && (parser.Flags & Flags.NoLeadingUnderscores) == Flags.NoLeadingUnderscores
+      ? appendStr[2..]
+      : appendStr;
 
-    if (modifier is not null)
-      left = subLeft + " " + modifier + strModif;
-    else {
-      // don't insert a space between duplicate '*'
-      if (!inArgs && strModif is [_, '*', ..] && subLeft[^1] == '*')
-        strModif = strModif[1..];
-      left = subLeft + strModif;
-    }
-
-    right = subRight;
-    parser.Stack.Num = mark;
-
-    return true;
+    string ws = isMsKeyword ? " " : "";
+    str = str is not null
+      ? str + (isMsKeyword ? " " : "") + append + (isMsKeyword ? "" : " ")
+      : append + (isMsKeyword ? "" : " ");
   }
 
   private static bool GetModifier(Parser parser, out string? ret, out string? ptrModif) {
@@ -1266,15 +1294,18 @@ public static class CsNameUndecorator {
       parser.Next();
     }
 
-    (bool result, ret) = parser.Current switch {
+    char current = parser.Current;
+    (bool result, ret) = current switch {
       'A' => (true, null),
       'B' => (true, "const"),
       'C' => (true, "volatile"),
       'D' => (true, "const volatile"),
       _ => (false, null)
     };
-
     parser.Next();
+    if (!result)
+      return Failed(parser);
+
     // In C# we don't care about these modifiers
     ret = null;
     return result;
@@ -1296,7 +1327,7 @@ public static class CsNameUndecorator {
     for (int i = parser.Stack.Num - 1; i >= start; i--) {
       sb.Append(parser.Stack.Strings![i]);
       if (i > start)
-        sb.Append(".");
+        sb.Append('.');
     }
 
     return sb.ToString();
@@ -1320,7 +1351,7 @@ public static class CsNameUndecorator {
     while (parser.Current != '@') {
       switch (parser.Current) {
         case '\0':
-          return false;
+          return Failed(parser);
 
         case '0':
         case '1':
@@ -1336,7 +1367,8 @@ public static class CsNameUndecorator {
           parser.Next();
           break;
         case '?':
-          switch (parser.Next()) {
+          char next = parser.Next();
+          switch (next) {
             case '$':
               parser.Next();
               name = GetTemplateName(parser);
@@ -1349,9 +1381,11 @@ public static class CsNameUndecorator {
               int num = parser.Names.Num;
 
               parser.Stack = new StringArray();
+              var str = parser.Remaining;
               if (SymbolDemangle(parser, out string? undecoratedName)) {
                 name = $"`{undecoratedName}'";
               }
+
               parser.Names.Start = start;
               parser.Names.Num = num;
               parser.Stack = stack;
@@ -1360,7 +1394,7 @@ public static class CsNameUndecorator {
             default:
               name = GetNumber(parser);
               if (name is null)
-                return false;
+                return Failed(parser);
 
               name = $"`{name}'";
               break;
@@ -1401,12 +1435,12 @@ public static class CsNameUndecorator {
         }
 
         if (parser.Current != '@')
-          return null;
+          return FailedNull(parser);
 
         break;
       }
       default:
-        return null;
+        return FailedNull(parser);
     }
 
     parser.Next();
@@ -1435,7 +1469,7 @@ public static class CsNameUndecorator {
     string? name = GetLiteralString(parser);
     if (name is null) {
       parser.Names.Start = startMark;
-      return null;
+      return FailedNull(parser);
     }
 
     StringArray arrayPmt = new();
@@ -1459,8 +1493,13 @@ public static class CsNameUndecorator {
         break;
       }
 
+      if (parser.Current is '$' && parser.Peek(1) is '$' && parser.Peek(2) is 'V') {
+        parser.Advance(3);
+        continue;
+      }
+
       if (!DemangleDataType(parser, out string? left, out string? right, pmt, true))
-        return null;
+        return FailedNull(parser);
 
       // 'void' terminates an argument list in a function
       if (zTerm && left == "void")
@@ -1476,7 +1515,7 @@ public static class CsNameUndecorator {
     if (zTerm) {
       if (parser.Current != 'Z') {
         parser.Next();
-        return null;
+        return FailedNull(parser);
       }
 
       parser.Next();
@@ -1502,9 +1541,9 @@ public static class CsNameUndecorator {
     int startIndex = parser.Index;
 
     do {
-      if (parser.Current is not (>= 'A' and <= 'Z' or >= 'a' and <= 'z' or >= '0' and <= '9' or '_' or '$' or '<' or '>'
-          or '-'))
-        return null;
+      if (parser.Current is not (>= 'A' and <= 'Z' or >= 'a' and <= 'z' or >= '0' and <= '9' or
+          '_' or '$' or '<' or '>' or '-'))
+        return FailedNull(parser);
     } while (parser.Next() != '@');
 
     string literal = parser.Input.Substring(startIndex, parser.Index - startIndex);
@@ -1514,9 +1553,9 @@ public static class CsNameUndecorator {
   }
 
   private static string? GetSimpleType(char c) => c switch {
-    'C' => nameof(CppSignedChar), // signed char
-    'D' => nameof(CppChar), // char
-    'E' => nameof(CppUnsignedChar), // unsigned char
+    'C' => nameof(signed_char), // signed char
+    'D' => nameof(_char), // char
+    'E' => nameof(unsigned_char), // unsigned char
     'F' => "short", // short
     'G' => "ushort", // unsigned short
     'H' => "short", // int
@@ -1540,8 +1579,8 @@ public static class CsNameUndecorator {
     'I' => "uint", // unsigned __int32,
     'J' => "long", // __int64,
     'K' => "ulong", // unsigned __int64,
-    'L' => nameof(CppInt128), // __int128,
-    'M' => nameof(CppUInt128), // unsigned __int128,
+    'L' => nameof(int128_t), // __int128,
+    'M' => nameof(uint128_t), // unsigned __int128,
     'N' => "bool", // bool
     'W' => "char", // wchar_t
     _ => null
