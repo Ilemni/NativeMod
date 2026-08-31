@@ -73,7 +73,6 @@ internal static class Program {
       }
     }
 
-    outputPath = @"C:\Users\Twili\source\repos\MioBinds\MioBinds";
     outputPath ??= Path.Combine(Directory.GetCurrentDirectory(), "output");
     string bindsPath = Path.Combine(outputPath, namespaceName);
     string nativeModPath = Path.Combine(outputPath, "NativeMod");
