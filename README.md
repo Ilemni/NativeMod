@@ -1,3 +1,6 @@
+> [!WARNING]
+> This project was made for a specific C++ game. Adapting this to other games will likely require more work.
+
 .NET type and function generator for C++ games, powered by [SharpPdb](https://github.com/southpolenator/SharpPdb).
 
 This generator requires a PDB file for the C++ game, so requires some developer support,
@@ -13,14 +16,25 @@ Some changes will be required to adapt this project to other C++ games.
 
 This project currently generates .cs files, rather than a compiled dll. 
 Running the generator for a 100MB PDB may take around 10 seconds, 
-while compiling the output files may take closer to a minute.
+while compiling the output files may take closer to a minute or longer.
 
 To compile, create a new project, and paste the output folders into the project.
 - The project requires a dependency to [PolyHook2.Net](https://www.nuget.org/packages/PolyHook2.NET/)
 
 ---
 
-## Structure of a generated project
+## What this project does
+
+- This project generates files to be compiled to a dll that is then referenced by a ModLoader and mods.
+
+## What this project does not do
+
+- This project does not generate a ModLoader.
+- This project does not generate a mechanism to run a .NET dll from C++ code.
+
+---
+
+## Structure of generated folders and files
 
 For this example, the namespace is assumed to be `MyGame`
 
@@ -41,8 +55,9 @@ For generated types, any functions which were fully inlined and had its function
 
 ## Using in a ModLoader
 
-A ModLoader **must** set `NativeMod.NativeModule.MemoryAddress` to the memory address of the game's executable
-before any static initializers are run for any structs or functions.
+> [!IMPORTANT]
+> A ModLoader **must** set `NativeMod.NativeModule.MemoryAddress` to the memory address of the game's executable
+before any static initializers are run for any of the generated structs or functions.
 
 ---
 
@@ -52,23 +67,25 @@ Although C# does not allow struct inheritance, types are generated to mirror the
 If a C++ struct inherits one or more base types, the generated struct contains those base types (named `Base`, or `Base1`, `Base2`, ...), and all inherited fields that reference the base types.
 Structs with virtual methods are supported, but not yet tested.
 
+Many struct methods may be missing, due to all instances of the C++ method being inlined, and the method being removed from the exe and pdb.
+
 ---
 
 ## Hooks
 
 Both class methods and global functions are hooked. Hooks are stored paths similar to the original type or global function's full name.
 
-| Class/Global | Hook? | Path |
-| -------- | ------- |
+| Type | Hook? | Path |
+| -------- | ------- | ------- |
 | Class | No | `MyGame.InnerNs.MyType.Foo()` |
-| Class | Yes | `On.MyGame.InnerNs.OnMyType.Foo` |
+| Class | Yes | `On.MyGame.InnerNs.On_MyType.Foo.Hook += ...` |
 | Global | No | `MyGame.GlobalFunctions.Path.To.File.Foo()` |
-| Global | Yes | `On.MyGame.GlobalFunctions.Path.To.On_File.Foo` |
+| Global | Yes | `On.MyGame.GlobalFunctions.Path.To.On_File.Foo.Hook += ...` |
 
 Hook types are a static class which have events for Prefix, Suffix, and the main Hook.
-- Prefixes do not use a return value.
-- Suffixes may modify the return value.
-- Hooks may modify arguments, the return value, and call the hooked C++ function 0 or more times.
+- `Prefix`es do not use a return value.
+- `Suffix`es may modify the return value.
+- `Hook`s may modify arguments, the return value, and call the hooked C++ function 0 or more times.
 
 ---
 
@@ -76,14 +93,14 @@ Hook types are a static class which have events for Prefix, Suffix, and the main
 
 Many features that would be needed for a comfortable modding experience is missing.
 - Constructors. Currently these are supported as
-    ```csharp
+    ```cs
     MyStruct myStruct = default;
     myStruct.Ctor(arg1, arg2);
     ```
 - Inherited methods. Currently requires
     ```cs
-    myStruct.Base.BaseMethod(arg1)
-    myStruct.Base.Base.OtherBaseMethod(arg1)
+    myStruct.Base.BaseMethod(arg1);
+    myStruct.Base.Base.OtherBaseMethod(arg1);
     ```
 - Modded inheritance. This has not been explored yet, but might be possible with some boilerplate.
 - Allocating structs in native memory. This requires some manual tracking to free allocated structs, or in cases where a fixed amount are needed in a mod's lifetime, simply defining a static field for the struct.
