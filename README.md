@@ -92,11 +92,6 @@ Hook types are a static class which have events for Prefix, Suffix, and the main
 ## Unimplemented features
 
 Many features that would be needed for a comfortable modding experience is missing.
-- Constructors. Currently these are supported as
-    ```cs
-    MyStruct myStruct = default;
-    myStruct.Ctor(arg1, arg2);
-    ```
 - Inherited methods. Currently requires
     ```cs
     myStruct.Base.BaseMethod(arg1);

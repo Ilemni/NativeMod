@@ -484,6 +484,15 @@ public sealed partial class CsGen {
   private static void WriteMethods(IndentedTextWriter writer, CsStructure csStruct) {
     var methods = csStruct.NonVirtualMethods;
     if (methods.Length > 0) {
+      var ctorMethods = methods.Where(m => (m.MethodRecord.Options & FunctionOptions.Constructor) != 0);
+      if (ctorMethods.Any()) {
+        using (writer.Region("Constructors")) {
+          foreach (CsMethod method in ctorMethods) {
+            WriteCtor(writer, csStruct, method);
+          }
+        }
+      }
+
       var staticMethods = methods.Where(m => m.MemberFunction.IsStatic);
       if (staticMethods.Any()) {
         using (writer.Region("Static Methods")) {
@@ -494,7 +503,7 @@ public sealed partial class CsGen {
       }
 
 
-      var instanceMethods = methods.Where(m => !m.MemberFunction.IsStatic);
+      var instanceMethods = methods.Where(m => !m.MemberFunction.IsStatic && (m.MethodRecord.Options & FunctionOptions.Constructor) == 0);
       if (instanceMethods.Any()) {
         using (writer.Region("Instance Methods")) {
           foreach (CsMethod method in instanceMethods) {
@@ -515,10 +524,35 @@ public sealed partial class CsGen {
     }
   }
 
-  private static void WriteMethod(IndentedTextWriter writer, CsStructure csStruct, CsMethod method) {
-    int vfOffset = method.VfSlot;
-    bool isDefined = method.IsDefined;
+  private static void WriteCtor(IndentedTextWriter writer, CsStructure csStruct, CsMethod method) {
+    if (method.VfSlot != -1) {
+      WriteMissingMethodInfo(writer, method, "Constructor with vtable offset is not yet supported.");
+      return;
+    }
 
+    if (!method.IsDefined) {
+      WriteMissingMethodInfo(writer, method, "Constructor with no procedure info.");
+      return;
+    }
+
+    if (method.MemberFunction.HasAnyVariadic) {
+      WriteMissingMethodInfo(writer, method, "Constructor with variadic parameters.");
+      return;
+    }
+
+    XmlDocs.Members.WriteMethod(writer, method);
+    writer.Write("public unsafe ");
+    writer.Write(csStruct.SelfName);
+    writer.Write("(");
+    writer.WriteParameterTypesAndNames(method.Parameters);
+    writer.Write(")");
+    using (writer.BracedScope(newLine: false)) {
+      WriteFixedMethodBody(writer, method);
+    }
+    writer.WriteLine();
+  }
+
+  private static void WriteMethod(IndentedTextWriter writer, CsStructure csStruct, CsMethod method) {
     if (method.Record.Attributes.MethodKind is MethodKind.PureVirtual or MethodKind.PureIntroducingVirtual) {
       if (!method.IsVirtual) {
         WriteMissingMethodInfo(writer, method, "Pure virtual method with no vtable offset.");
@@ -531,7 +565,7 @@ public sealed partial class CsGen {
     }
 
     if (method.CppName.StartsWith("operator")) {
-      if (isDefined) {
+      if (method.IsDefined) {
         WriteOperator(writer, method);
       }
       else {
@@ -541,7 +575,7 @@ public sealed partial class CsGen {
       return;
     }
 
-    if (!isDefined && vfOffset == -1) {
+    if (method is { IsDefined: false, VfSlot: -1 }) {
       if (method.Name is "d" && csStruct.SelfName.StartsWith("TNode")) {
         WriteSpecialCaseTNodeMethod(writer, method);
       }
@@ -558,7 +592,7 @@ public sealed partial class CsGen {
     }
 
     if (method.MethodRecord.ThisPointerAdjustment != 0) {
-      WriteMissingMethodInfo(writer, method, "Non-zero this pointer adjustment.");
+      WriteMissingMethodInfo(writer, method, "Non-zero this pointer adjustment is not yet supported.");
       return;
     }
 
@@ -569,22 +603,20 @@ public sealed partial class CsGen {
     else {
       WriteVirtualMethod(writer, method);
     }
+  }
 
-    return;
-
-    static void WriteMissingMethodInfo(IndentedTextWriter writer, CsMethod method, string reason) {
-      // This is regular comment, so avoid CsType.XmlCppName
-      writer.Write("// Skipping method ");
-      writer.Write('[');
-      writer.Write(method.CppName);
-      writer.Write('(');
-      writer.WriteParameterTypes(method.MemberFunction.ParameterTypes, p => p.CppName);
-      writer.Write(") -> ");
-      writer.Write(method.MemberFunction.ReturnType.CppName);
-      writer.Write(']');
-      writer.Write(" because: ");
-      writer.WriteLine(reason);
-    }
+  private static void WriteMissingMethodInfo(IndentedTextWriter writer, CsMethod method, string reason) {
+    // This is regular comment, so avoid CsType.XmlCppName
+    writer.Write("// Skipping method ");
+    writer.Write('[');
+    writer.Write(method.CppName);
+    writer.Write('(');
+    writer.WriteParameterTypes(method.MemberFunction.ParameterTypes, p => p.CppName);
+    writer.Write(") -> ");
+    writer.Write(method.MemberFunction.ReturnType.CppName);
+    writer.Write(']');
+    writer.Write(" because: ");
+    writer.WriteLine(reason);
   }
 
   private static void WriteNormalMethod(IndentedTextWriter writer, CsMethod method) {

@@ -460,15 +460,18 @@ public static class XmlDocs {
     public static void WriteMethodPointer(Writer writer, CsStructure csStruct, CsMethod method) {
       writer.Write("/// <summary>Function pointer for method <see cref=\"");
       writer.Write(csStruct.GlobalQualifiedName);
-      writer.Write('.');
-      if (method.CppName is "operator[]" && !CsGen.IndexerHasConflictingName(method.MemberFunction)) {
-        writer.Write("get_Item");
-      }
-      else if (method.Name.StartsWith("operator")) {
-        writer.Write(method.CleanName);
-      }
-      else {
-        writer.Write(method.Name);
+
+      if ((method.MethodRecord.Options & FunctionOptions.Constructor) == 0) {
+        writer.Write('.');
+        if (method.CppName is "operator[]" && !CsGen.IndexerHasConflictingName(method.MemberFunction)) {
+          writer.Write("get_Item");
+        }
+        else if (method.Name.StartsWith("operator")) {
+          writer.Write(method.CleanName);
+        }
+        else {
+          writer.Write(method.Name);
+        }
       }
 
       var parameters = method.MemberFunction.ParameterTypes;
@@ -522,7 +525,7 @@ public static class XmlDocs {
         writer.Write("\"/> ");
       }
 
-      writer.Write("Method: ");
+      writer.Write((method.MethodRecord.Options & FunctionOptions.Constructor) != 0 ? "Constructor: " : "Method: ");
       writer.Write(method.XmlCppName);
 
       CsType ret = method.MemberFunction.ReturnType;
@@ -641,10 +644,14 @@ public static class XmlDocs {
       }
 
       writer.WriteLine("</see></summary>");
+
+      // Inject params tags to the hook class definition,
+      // since added delegates don't inheritdoc the delegates by default
+      writer.WriteManyLine("/// <inheritdoc cref=\"orig_", method.Name, "\"/>");
     }
 
     public static void WriteHookForClass(Writer writer, CsStructure csStruct) {
-      writer.Write("/// <summary>Hooks for class ");
+      writer.Write("/// <summary>Hooks for struct ");
       WriteSeeTag(writer, csStruct);
       writer.WriteLine("</summary>");
     }
@@ -653,14 +660,19 @@ public static class XmlDocs {
       CsMethod m = method.Method!;
       CsMemberFunctionType mFunc = m.MemberFunction;
       CsType classType = mFunc.ClassType;
-      writer.Write("/// <summary>Hook for class method <see cref=\"");
+      bool isCtor = (m.MethodRecord.Options & FunctionOptions.Constructor) != 0;
+      writer.Write("/// <summary>Hook for struct ");
+      writer.Write(isCtor ? "constructor " : "method ");
+      writer.Write("<see cref=\"");
       writer.Write(classType.GlobalQualifiedName);
-      writer.Write('.');
-      if (m.CppName is not "operator[]" || CsGen.IndexerHasConflictingName(mFunc)) {
-        writer.Write(m.Name);
-      }
-      else {
-        writer.Write("get_Item");
+      if (!isCtor) {
+        writer.Write('.');
+        if (m.CppName is not "operator[]" || CsGen.IndexerHasConflictingName(mFunc)) {
+          writer.Write(m.Name);
+        }
+        else {
+          writer.Write("get_Item");
+        }
       }
 
       if (m.OverloadId != 0) {
@@ -680,7 +692,10 @@ public static class XmlDocs {
         writer.Write(')');
       }
 
+      // Inject params tags to the hook class definition,
+      // since added delegates don't inheritdoc the delegates by default
       writer.WriteLine("</see></summary>");
+      writer.WriteManyLine("/// <inheritdoc cref=\"orig_", method.Name, "\"/>");
     }
 
     public static void WritePrefixDelegate(Writer writer, CsGen.HookMethod method) {
